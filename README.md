@@ -50,6 +50,33 @@ the M-series GPU through MLX. Measured on an M1 Pro:
 FP64-heavy work (the BEM root-finding, any true CFD) stays on the CPU, where Apple-Silicon double
 precision is emulated and slow.
 
+## Performance cores
+
+The M1 Pro has **8 performance + 2 efficiency cores**, and the scheduler places work on one or the
+other by *Quality of Service* (QoS). Work pushed onto the E-cores runs **5–27× slower** (measured:
+BLAS 1742→78 GFLOPS, the NumPy presim 1.9→9.7 s). A foreground terminal process already gets the
+P-cores; the trap is lowering its QoS — `nohup`, `nice`, `taskpolicy -c background`, or a low-QoS
+parent — which forces the E-cores and **cannot be undone from inside the process**.
+
+So the single most important rule is: **don't background-clamp the heavy runs.** Beyond that,
+[`perf.py`](perf.py) + the [`run`](run) launcher add two things for free:
+
+```bash
+./run 02_fire/fire_real.py        # P-core QoS bump + Accelerate thread caps (8), then runs it
+python perf.py --audit            # report cores + a P-core/E-core sanity benchmark
+```
+
+- **Thread caps** (`VECLIB_MAXIMUM_THREADS=8`, set before NumPy imports) lift BLAS-heavy ops ~25–30%
+  over the default (NumPy here uses Apple's **Accelerate**, the optimal Apple-Silicon BLAS).
+- **A QoS bump** (`pthread_set_qos_class_self_np` → `USER_INITIATED`) pulls the process back onto the
+  P-cores under a *soft* low-QoS launch (a UTILITY parent recovered 1392→1750 GFLOPS). It can't escape
+  a *hard* `background` clamp — nothing can.
+
+Honest scope: the genuinely heavy compute is already GPU-parallel via MLX, and the remaining CPU
+paths (the BEM continuation, the wind CG, the relaxation sweeps) are *sequential* — not parallelisable
+across cores. So this isn't about spreading work over more cores; it's about making sure the cores it
+*does* run on are the fast ones.
+
 ## Quickstart
 
 ```bash
@@ -73,7 +100,9 @@ python 02_fire/rothermel_ca.py --validate
 ```
 
 Figures are written to each module's `output/` directory. The 3-D viewers open a native window;
-run them from a terminal (not a headless/background process).
+run them from a terminal (not a headless/background process). Prefix any command with `./run`
+(e.g. `./run 02_fire/fire_real.py`) for performance-core scheduling + tuned BLAS threads — see
+[Performance cores](#performance-cores).
 
 ## Data sources & attribution
 

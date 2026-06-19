@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Project Sycamore performance launcher — P-core scheduling + optimal Accelerate
+# threads. Usage:  ./run 02_fire/fire_real.py [args...]
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PY="${SYC_PY:-$HOME/ds/bin/python}"
+export VECLIB_MAXIMUM_THREADS="${VECLIB_MAXIMUM_THREADS:-8}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-8}"
+export NUMEXPR_MAX_THREADS="${NUMEXPR_MAX_THREADS:-8}"
+exec "$PY" "$ROOT/perf.py" "$@"
