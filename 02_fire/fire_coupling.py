@@ -214,16 +214,21 @@ def calibrate_indraft_from_plume(N=96, U_wind=0.030, beta=1.6e-3, cache='output/
     uy_g = uy[band].mean(axis=0)                        # (Ny, Nx) crosswind velocity
     # CROSSWIND inflow profile through the fire (x=xc): the clean sector (the wind is +x, so
     # the y-flow is the fire's own pull, not forced through-flow). Inward = toward yc.
-    prof = uy_g[:, xc]
-    ys = np.arange(N) - yc
-    inward = -prof * np.sign(ys)                        # >0 = converging toward the fire
-    peak = float(inward.max())
+    Y, X = np.mgrid[0:N, 0:N]
+    inward_field = -uy_g * np.sign(Y - yc)             # crosswind inflow toward the fire (>0)
+    # PEAK over a window around+downwind of the fire — the plume bends downwind, so the true
+    # peak crosswind indraft is NOT at the source column x=xc (sampling only x=xc under-reads
+    # the anchor ~2x). Exclude the −x inlet column and the centreline (sign(0)=0).
+    win = ((np.abs(X - xc) <= 5*src_r) & (np.abs(Y - yc) <= 6*src_r)
+           & (np.abs(Y - yc) >= 1) & (X >= 2))
+    masked = np.where(win, inward_field, -np.inf)
+    peak = float(masked.max())
     R_LBM = peak / U
-    # decay: |Δy| (in fire-radii) where the inward profile falls to half its peak
-    half = peak * 0.5
-    over = np.where(inward[ys != 0] >= half)[0]
-    rr = np.abs(ys[ys != 0])
-    decay_radii = float(rr[over].max() / src_r) if over.size else 1.0
+    yi, xi = np.unravel_index(int(np.argmax(masked)), masked.shape)
+    # decay: crosswind half-width (in fire-radii) at the column where the inflow peaks
+    profp = inward_field[:, xi]; ys = np.arange(N) - yc
+    over = np.where((profp >= 0.5*peak) & (ys != 0))[0]
+    decay_radii = float(np.abs(ys[over]).max() / src_r) if over.size else 1.0
 
     os.makedirs(os.path.dirname(cpath), exist_ok=True)
     np.savez(cpath, R_LBM=R_LBM, decay_radii=decay_radii, U_wind=U, src_r=src_r, N=N, peak=peak)
@@ -272,6 +277,7 @@ def couple_fire_atmosphere(H=240, W=320, DX=30.0, U0_ms=2.5, from_deg=270.0,
     per_iter = [dict(it=0, burned=int(burning.sum()), tag='ambient')]
     r = base; Tcoup = Tamb; prev = int(burning.sum())
     K = 1 if mode == 'oneway' else K
+    converged = (mode == 'oneway'); hist = [prev]
     for k in range(1, K+1):
         wind_fn = make_wind_coupled(U0_ms, from_deg, burning, intensity, peak_indraft,
                                     terrain=terrain)
@@ -280,17 +286,27 @@ def couple_fire_atmosphere(H=240, W=320, DX=30.0, U0_ms=2.5, from_deg=270.0,
         new_burning = np.isfinite(Tcoup) & (Tcoup <= t_star)    # footprint at the SAME snapshot time
         nb = int(new_burning.sum())
         dburn = abs(nb - prev) / max(prev, 1)
+        hist.append(nb)
+        # plateau test: the last 3 footprints lie within 2% of their mean. This is robust to
+        # a tiny wiggle at a stable fixed point AND correctly rejects a real oscillation (whose
+        # window spread stays large) — a single near-flat consecutive step can't fake it.
+        win = hist[-3:]
+        plateau = len(win) >= 3 and (max(win) - min(win)) / max(np.mean(win), 1) < 0.02
         per_iter.append(dict(it=k, burned=nb, dburn=dburn))
         if verbose:
             print(f"  iter {k}: snapshot footprint {nb} cells (Δ {dburn*100:.2f}% vs prev)")
         burning = new_burning
         intensity = np.nan_to_num(r['head_ros_ms'])
-        if mode == 'iterated' and dburn < 0.01:
+        if mode == 'iterated' and plateau:
+            converged = True
             break
         prev = nb
+    if verbose and mode == 'iterated' and not converged:
+        print(f"  ⚠ Picard hit K={K} without saturating (last Δ {dburn*100:.2f}% — still oscillating)")
     z = base['z']
     du, dv = fire_indraft_scaled(z, DX, burning, intensity, peak_indraft)
     return dict(ambient=base, coupled=r, Tamb=Tamb, Tcoup=Tcoup, per_iter=per_iter,
+                converged=converged,
                 peak_indraft=peak_indraft, R_LBM=R, t_star=t_star, decay_radii=decay_radii,
                 U0_ms=U0_ms, from_deg=from_deg, DX=DX, calib=calib, burning_final=burning,
                 indraft=(du, dv), z=z)
@@ -309,10 +325,19 @@ def _signature(res, n_meas=9000):
     coupled fire at the SAME t_meas isolates the feedback: a slower fire covers fewer cells
     / less reach; a faster one, more."""
     Tamb, Tcoup = res['Tamb'], res['Tcoup']
+    H, W = Tamb.shape
     t = _time_at_count(Tamb, n_meas)
     A_amb = np.isfinite(Tamb) & (Tamb <= t)
     A_cou = np.isfinite(Tcoup) & (Tcoup <= t)
     gi, gj = res['ambient']['ignition']
+
+    # boundary-isolation guard for the MEASURED metrics: the head reach (East, +col) and the
+    # crosswind width (North/South rows). A wall there clips the metric. The slow BACKING fire
+    # creeping to the West wall over the long t_meas does NOT affect head/width, so the West
+    # edge is excluded (the area metric does include the backing — reported with that caveat).
+    union = A_amb | A_cou
+    touch = (union[:, -2:].any() or union[:2, :].any() or union[-2:, :].any())   # East, N, S
+    isolated = not bool(touch)
 
     def extent(mask):
         ys, xs = np.where(mask)
@@ -321,9 +346,12 @@ def _signature(res, n_meas=9000):
         return int(xs.max() - gj), int(ys.max() - ys.min() + 1), int(mask.sum())   # head reach E, NS width, area
     hd_a, wd_a, ar_a = extent(A_amb)
     hd_c, wd_c, ar_c = extent(A_cou)
+    if not isolated:
+        print("  ⚠ WARNING: fire touches the domain boundary at t_meas — head/width metrics "
+              "are clipping-corrupted (enlarge the domain / move the ignition).")
     common = np.isfinite(Tamb) & np.isfinite(Tcoup) & (Tamb <= t)
     dT = np.where(common, Tamb - Tcoup, np.nan)          # >0 = coupled earlier; restricted to the ellipse
-    return dict(t=t, n_meas=n_meas, amb_area=ar_a, cou_area=ar_c,
+    return dict(t=t, n_meas=n_meas, amb_area=ar_a, cou_area=ar_c, isolated=isolated,
                 d_area_pct=100*(ar_c-ar_a)/max(ar_a, 1),
                 amb_head=hd_a, cou_head=hd_c, amb_wid=wd_a, cou_wid=wd_c,
                 d_head_pct=100*(hd_c-hd_a)/max(hd_a, 1),
@@ -342,17 +370,29 @@ def run_demo(mode='iterated', verbose=True, figure=True):
     # Weak ambient wind (2.5 m/s): the plume-dominated regime where the fire-induced indraft
     # is a LARGE relative perturbation. In a strong wind-driven fire the same indraft is a
     # small fraction of the ambient and the effect nearly vanishes (the correct dependence).
-    res = couple_fire_atmosphere(H=240, W=320, DX=30.0, U0_ms=2.5, from_deg=270.0,
-                                 ignition=(0.5, 0.30), terrain_fn=flat_terrain,
+    # Ignition far WEST with a long EAST runway so the head stays clear of the boundary —
+    # otherwise the head reach is clipped by the wall and the head change is unmeasurable.
+    res = couple_fire_atmosphere(H=240, W=500, DX=30.0, U0_ms=2.5, from_deg=270.0,
+                                 ignition=(0.14, 0.5), terrain_fn=flat_terrain,   # (col, row): west-centre
                                  mode=mode, n_star=4500, calib=calib, verbose=verbose)
     sig = _signature(res); res['sig'] = sig
+    # actually RUN the validations the figure reports (no hardcoded checkmarks)
+    res['checks_ok'] = validate_sign()
+    zr = np.zeros_like(res['z'])
+    a_s, a_f = make_wind_coupled(res['U0_ms'], res['from_deg'], np.zeros(res['z'].shape, bool),
+                                 zr, 0.0, terrain=True)(res['z'], zr, zr, res['DX'])
+    c_s, c_f = make_wind_coupled(res['U0_ms'], res['from_deg'], res['burning_final'],
+                                 zr, 0.0, terrain=True)(res['z'], zr, zr, res['DX'])
+    res['null_ok'] = bool(np.array_equal(a_s, c_s) and np.array_equal(a_f, c_f))
     if verbose:
-        print(f"\nSpread signature at t={sig['t']:.0f} min (isolated fire, coupled vs ambient):")
-        print(f"  burned area:    {sig['amb_area']} → {sig['cou_area']} cells ({sig['d_area_pct']:+.1f}%)")
+        print(f"\nSpread signature at t={sig['t']:.0f} min ({'isolated' if sig['isolated'] else 'NOT isolated!'} "
+              f"fire, coupled vs ambient), converged={res['converged']}:")
+        print(f"  burned area:    {sig['amb_area']} → {sig['cou_area']} cells ({sig['d_area_pct']:+.1f}%, incl. backing)")
         print(f"  head reach (E): {sig['amb_head']} → {sig['cou_head']} cells ({sig['d_head_pct']:+.1f}%)")
         print(f"  crosswind width:{sig['amb_wid']} → {sig['cou_wid']} cells ({sig['d_wid_pct']:+.1f}%)")
-        print(f"  median |Δarrival| = {sig['median_dT']:.1f} min")
-        print(f"  (STEADY kinematic indraft — lateral convergence; not unsteady pyroconvective momentum)")
+        print(f"  null control (peak=0 → ambient wind): {res['null_ok']}; foundational checks: {res['checks_ok']}")
+        print(f"  → the steady indraft RETARDS the fire — flanks most (lateral convergence), head less;")
+        print(f"    NOT unsteady pyroconvective acceleration (out of scope).")
     if figure:
         make_coupling_figure(res)
     return res
@@ -378,7 +418,7 @@ def make_coupling_figure(res, out='output/fire_coupling.png'):
                  color='steelblue', scale=res['peak_indraft']*20, width=0.004, alpha=0.8)
     ax[0].plot(gj*DX/1000, gi*DX/1000, 'k*', ms=14)
     ax[0].set_title(f"Fire at a fixed snapshot — ambient (orange fill) vs coupled (red)\n"
-                    f"the indraft (blue) pinches the flanks: width {sig['d_wid_pct']:+.0f}%")
+                    f"the indraft (blue) retards the fire: width {sig['d_wid_pct']:+.0f}%, head {sig['d_head_pct']:+.0f}%")
 
     # Panel 2 — Δarrival: where the feedback delays the fire (flanks), in hours
     dT = sig['dT'] / 60.0                                                     # → hours
@@ -386,21 +426,24 @@ def make_coupling_figure(res, out='output/fire_coupling.png'):
     im = ax[1].imshow(dT, origin='lower', cmap='RdBu_r', vmin=-lim, vmax=lim, extent=ext, aspect='auto')
     fig.colorbar(im, ax=ax[1], shrink=0.82).set_label('Δarrival  T_amb − T_coupled  [h]')
     ax[1].plot(gj*DX/1000, gi*DX/1000, 'k*', ms=12)
-    ax[1].set_title("Feedback delays the FLANKS (blue), not the head\n"
-                    "lateral convergence, not pyroconvective acceleration")
+    ax[1].set_title("Feedback delays the fire — FLANKS most (lateral convergence),\n"
+                    "head less; not unsteady pyroconvective acceleration")
 
-    # Panel 3 — Picard saturation + calibration/validation summary
+    # Panel 3 — Picard saturation + calibration/validation summary (REAL run results)
     bi = [d['burned'] for d in res['per_iter']]
+    niter = len(bi) - 1
     ax[2].plot(range(len(bi)), bi, 'o-', color='firebrick')
+    sat = f"saturates in {niter} iters" if res.get('converged') else f"NOT converged ({niter} iters)"
     ax[2].set(xlabel='Picard iteration', ylabel='snapshot footprint [cells]',
-              title='Feedback saturates in ~4 iterations')
+              title=f'Feedback {sat}')
     ax[2].grid(alpha=0.3)
-    txt = (f"indraft = {res['R_LBM']:.2f} × ambient  (LBM-calibrated)\n"
-           f"peak {res['peak_indraft']:.1f} m/s,  reach {res['calib']['decay_radii']:.1f} fire-radii\n"
-           f"signature:  width {sig['d_wid_pct']:+.0f}%,  area {sig['d_area_pct']:+.0f}%,\n"
-           f"            head {sig['amb_head']}→{sig['cou_head']} cells\n"
-           f"null control (no indraft) → coupled == ambient ✓\n"
-           f"sign/mass/inward solve checks ✓")
+    ck = lambda b: '✓' if b else '✗'
+    txt = (f"indraft = {res['R_LBM']:.2f} × ambient  (LBM-calibrated peak)\n"
+           f"peak {res['peak_indraft']:.1f} m/s;  LBM reach {res['calib']['decay_radii']:.1f} fire-radii\n"
+           f"(model's 2-D reach is broader — disclosed)\n"
+           f"signature:  width {sig['d_wid_pct']:+.0f}%,  head {sig['d_head_pct']:+.0f}%,  area {sig['d_area_pct']:+.0f}%\n"
+           f"null control (peak=0 → ambient wind) {ck(res.get('null_ok'))}   "
+           f"sign/mass/inward checks {ck(res.get('checks_ok'))}")
     ax[2].text(0.5, -0.34, txt, transform=ax[2].transAxes, ha='center', va='top', fontsize=9,
                bbox=dict(boxstyle='round', fc='#eef', ec='#99c'))
     for a in ax[:2]:
