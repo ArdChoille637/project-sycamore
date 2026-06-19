@@ -95,6 +95,7 @@ Real-data layers wired in: **wind** (HRRR + mass-conserving terrain downscaling)
 
 ## License
 
-Research / educational use. See `LICENSE` if present, otherwise all rights reserved by the author.
+[MIT](LICENSE) © 2026 Michael Ray Gregory. The bundled public datasets (HRRR, 3DEP, LANDFIRE) are
+U.S. public-domain / open data under their own terms.
 
 🤖 Simulation suite developed with [Claude Code](https://claude.com/claude-code).
