@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Virtual envs
+venv/
+.venv/
+env/
+
+# OS
+.DS_Store
+
+# Manim build artifacts (regenerable, large)
+media/
+
+# Cached fetched data (DEM / fuel rasters live in /tmp by default; ignore if copied in)
+*.npy
+data/cache/
+
+# Local scratch
+*.log
+scratch/

@@ -1,0 +1,24 @@
+# Core scientific stack
+numpy
+scipy
+matplotlib
+contourpy        # fire-front contour extraction
+
+# Apple-Silicon GPU acceleration (Metal). On non-Apple hardware the code
+# falls back to NumPy automatically.
+mlx
+
+# Fire model + geometry
+shapely          # Huygens elliptical perimeter (rothermel.py)
+
+# Real-environment data fetch
+herbie-data      # NOAA HRRR wind via the cloud archive
+pyproj           # UTM projection for DEM / fuel tiles
+requests         # USGS 3DEP + LANDFIRE REST ImageServers
+Pillow           # read float32 GeoTIFF tiles
+
+# Aerodynamics (BEM autorotation solver)
+control          # 01_aero/samara_bem.py
+
+# Optional: educational animation (sycamore_teach.py)
+# manim
