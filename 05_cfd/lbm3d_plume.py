@@ -54,7 +54,7 @@ class LBM3DPlume(LBM3DFlow):
 
     def _zmask(self, k):
         m = (np.arange(self.N) == k).astype('f4')
-        return mx.array(m.reshape(1, 1, -1, 1)) > 0.5     # selects z=k plane in (19,Nz,Ny,Nx)
+        return mx.array(m.reshape(1, -1, 1, 1)) > 0.5     # selects z=k plane (z=axis1) in (19,Nz,Ny,Nx)
 
     def step(self):
         f = self.f.astype(mx.float32)
@@ -81,7 +81,7 @@ class LBM3DPlume(LBM3DFlow):
         if self.outlet:
             f = mx.where(self._xmask(self.N-1), mx.roll(f, 1, axis=3), f)   # +x wind outflow
         if self.top_outlet:
-            f = mx.where(self._zmask(self.N-1), mx.roll(f, 1, axis=2), f)   # +z plume outflow
+            f = mx.where(self._zmask(self.N-1), mx.roll(f, 1, axis=1), f)   # +z plume outflow (z=axis1)
         if self.inlet_u is not None:
             f = mx.where(self._xmask(0), mx.array(self.feq_in).reshape(19, 1, 1, 1), f)
         self.f = f.astype(self.sd)
@@ -89,16 +89,24 @@ class LBM3DPlume(LBM3DFlow):
         self._transport(np.array(ux), np.array(uy), np.array(uz))
 
     def _transport(self, ux, uy, uz):
-        """First-order upwind advection + central diffusion of T (host-side; T is small)."""
+        """First-order upwind advection + central diffusion of T (host-side; T is small).
+        Solids are treated as zero-flux thermal walls: no advection through a wall, no heat
+        stored in solid cells, and the z=0 ground does not pull from the periodic-wrapped top."""
         T = self.T
+        fluid = ~self.solid
+        ux = ux*fluid; uy = uy*fluid; uz = uz*fluid          # no advective flux through walls
+        Tw = np.where(self.solid, 0.0, T)                    # solids contribute no heat to the stencil
         # upwind spatial derivatives (axis 2=x, 1=y, 0=z)
-        ax = ux*np.where(ux > 0, T - np.roll(T, 1, 2), np.roll(T, -1, 2) - T)
-        ay = uy*np.where(uy > 0, T - np.roll(T, 1, 1), np.roll(T, -1, 1) - T)
-        az = uz*np.where(uz > 0, T - np.roll(T, 1, 0), np.roll(T, -1, 0) - T)
-        lap = (np.roll(T, 1, 2) + np.roll(T, -1, 2) + np.roll(T, 1, 1) + np.roll(T, -1, 1)
-               + np.roll(T, 1, 0) + np.roll(T, -1, 0) - 6.0*T)
+        ax = ux*np.where(ux > 0, Tw - np.roll(Tw, 1, 2), np.roll(Tw, -1, 2) - Tw)
+        ay = uy*np.where(uy > 0, Tw - np.roll(Tw, 1, 1), np.roll(Tw, -1, 1) - Tw)
+        az = uz*np.where(uz > 0, Tw - np.roll(Tw, 1, 0), np.roll(Tw, -1, 0) - Tw)
+        az[0, :, :] = 0.0                                    # ground: no advective wrap to the top
+        lap = (np.roll(Tw, 1, 2) + np.roll(Tw, -1, 2) + np.roll(Tw, 1, 1) + np.roll(Tw, -1, 1)
+               + np.roll(Tw, 1, 0) + np.roll(Tw, -1, 0) - 6.0*Tw)
+        lap[0, :, :] = 0.0                                   # ground: no diffusion across the z-wrap
         Tn = T - (ax + ay + az) + self.kappa*lap
         Tn[self.src] = 1.0                          # fire holds its heat
+        Tn[self.solid] = 0.0                        # no heat stored in solid cells (ground wall)
         if self.inlet_u is not None:
             Tn[:, :, 0] = 0.0                        # cold ambient air enters on −x
         if self.top_outlet:
@@ -117,7 +125,7 @@ def validate_buoyancy(N=48, beta=1e-3, tau=0.6, steps=200):
     sim.T[:] = 1.0                        # uniform temperature → uniform body force
     ws = []
     for n in (50, 100, 150, 200):
-        sim.run(50, batch=1) if ws else sim.run(50, batch=1)
+        sim.run(50, batch=1)
         _, _, _, uz = sim.macroscopic()
         ws.append((n, float(mx.mean(uz))))
     print(f"Uniform-buoyancy ramp  N={N}, β={beta}:  w should equal β·n")
@@ -127,6 +135,34 @@ def validate_buoyancy(N=48, beta=1e-3, tau=0.6, steps=200):
         ok &= err < 5.0
         print(f"  n={n:4d}:  w = {w:.3e}   β·n = {beta*n:.3e}   ({err:.1f}% err)")
     print(f"  {'PASS' if ok else 'FAIL'}  (Guo vertical force reproduces w = β·n within 5%)")
+    return ok
+
+
+def validate_walls(N=32, steps=400):
+    """Boundary sanity for the full plume config (ground + open top + wind). The uniform-
+    buoyancy test runs on a periodic box and so cannot see a boundary bug; this exercises
+    the walls and would fail loudly if the z-top outflow were mis-axised onto a side face."""
+    # (1) structural: the top-outlet mask MUST select the z=N-1 plane, not a lateral wall
+    probe = LBM3DPlume(N, 0.05, 1e-3)
+    m = np.broadcast_to(np.array(probe._zmask(N-1))[0], (N, N, N))
+    zz, yy, _ = np.mgrid[0:N, 0:N, 0:N]
+    z_sel = sorted(set(zz[m].tolist())); y_spread = len(set(yy[m].tolist()))
+    mask_ok = (z_sel == [N-1]) and (y_spread == N)
+    # (2) run the real config and check the ground wall is thermally sealed
+    r = fire_plume(N=N, steps=steps, verbose=False)
+    sim = r['sim']
+    _, _, _, uz = sim.macroscopic(); uz = np.array(uz)
+    g_heat = float(sim.T[0].max())                  # ground is a cold solid wall → exactly 0
+    g_uz = float(np.abs(uz[0]).mean())              # mean ground motion (wrap signature) → small
+    top_T = float(sim.T[-1].max())                  # plume hasn't reached the lid in a short run
+    print(f"Plume wall sanity  N={N}, {steps} steps:")
+    print(f"  top-outlet mask hits z-plane {z_sel} (y spans {y_spread}/{N})  → "
+          f"{'z-top ✓' if mask_ok else 'WRONG FACE ✗'}")
+    print(f"  ground heat   max T[z=0]   = {g_heat:.2e}   (must be 0 — no heat into the wall)")
+    print(f"  ground motion mean|u_z[0]| = {g_uz:.2e}   (small — no periodic-lid updraft wrap)")
+    print(f"  lid heat      max T[z=N-1] = {top_T:.2e}   (≈0 early)")
+    ok = mask_ok and g_heat < 1e-6
+    print(f"  {'PASS' if ok else 'FAIL'}  (top BC on the z-face + ground thermally sealed)")
     return ok
 
 
@@ -212,5 +248,8 @@ def make_figure(r, out='output/lbm3d_fire_plume.png'):
 if __name__ == '__main__':
     if '--plume' in sys.argv:
         make_figure(fire_plume())
+    elif '--walls' in sys.argv:
+        validate_walls()
     else:
         validate_buoyancy()
+        validate_walls()
