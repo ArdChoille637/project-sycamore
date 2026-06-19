@@ -26,6 +26,7 @@ with a NumPy fallback everywhere.
 | `05_cfd/lbm_cylinder.py` | Flow past a cylinder — Kármán vortex street + momentum-exchange forces (qualitative; St/Cd elevated by channel confinement). |
 | `05_cfd/lbm_samara.py` | Samara section at high angle of attack — the **leading-edge vortex** the attached-flow BEM model omits. |
 | `05_cfd/lbm3d_mlx.py` | **3-D D3Q19 Lattice-Boltzmann** (MLX) — the "4-D" (3-D space + time) keystone. Fully GPU-resident, fused per-population collision, fp16-storage option. Validated vs the **Taylor-Green vortex** (analytic decay rate 4νk², **0.0% error**). 256³ fits 16 GB at ~8 GB peak (~22 MLUPS) — the practical ceiling on this machine. |
+| `05_cfd/lbm3d_flow.py` | 3-D obstacle flow on the core (solid bounce-back + velocity inlet + outlet + momentum-exchange force) — the infrastructure toward the rotating samara. Flow validated on a sphere (clean recirculation wake); absolute force uncalibrated (same factor as the 2-D MEM). Next: a rotating-frame body force for the spanwise-stabilised LEV. |
 | `02_fire/rothermel.py` | Rothermel (1972) surface-fire rate-of-spread + Anderson fuel models + Huygens elliptical perimeter growth. |
 | `02_fire/rothermel_ca.py` | **Rothermel cellular automaton** — the point model turned into a spatial fire over terrain. Per-cell wind⊕slope ellipse spread; fire front as a GPU min-arrival-time relaxation. Spatial fuel + spatial wind aware. |
 | `02_fire/real_terrain.py` | Real **USGS 3DEP** bare-earth DEM via the ImageServer REST API (pyproj + Pillow, no GDAL). |
