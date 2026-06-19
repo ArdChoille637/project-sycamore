@@ -210,7 +210,7 @@ def simulate(H=220, W=320, DX=25.0,
              fuel=FUEL_MODELS[2], M=0.08,
              wind_ms=2.5, wind_from_deg=270.0,     # MIDFLAME wind FROM the west → blows east
              ignition=(0.30, 0.55), use_mlx=True, max_sweeps=None, verbose=False,
-             terrain_fn=None, fuel_fn=None, wind_fn=None):
+             terrain_fn=None, fuel_fn=None, wind_fn=None, moisture_fn=None):
     """Run the fire-spread CA. Returns a dict of fields (NumPy) for plotting.
     `fuel_fn(H,W,DX)` → dict(w0,delta,sigma,h,Mx, burnable[, code]) makes fuel
     spatial (e.g. a real LANDFIRE map); else the uniform `fuel` model is used.
@@ -221,11 +221,23 @@ def simulate(H=220, W=320, DX=25.0,
 
     # ── terrain & static fields ──
     z, dzdx, dzdy = (terrain_fn or make_terrain)(H, W, DX)
+
+    # moisture: scalar, or a spatial field (HRRR weather × terrain microclimate)
+    M_field = None
+    M_used = M
+    if moisture_fn is not None:
+        M_used = np.asarray(moisture_fn(z, dzdx, dzdy, DX), 'f8')
+        M_field = M_used.astype('f4')
+
     burnable = None;  fuel_code = None
     if fuel_fn is not None:
         ff = fuel_fn(H, W, DX)
-        co = rothermel_coeffs_field(ff['w0'], ff['delta'], ff['sigma'], ff['h'], ff['Mx'], M)
+        co = rothermel_coeffs_field(ff['w0'], ff['delta'], ff['sigma'], ff['h'], ff['Mx'], M_used)
         burnable = np.asarray(ff['burnable']);  fuel_code = ff.get('code')
+    elif moisture_fn is not None:                         # spatial moisture, uniform fuel
+        g = lambda v: np.full((H, W), v, 'f8')
+        co = rothermel_coeffs_field(g(fuel['w0']), g(fuel['delta']), g(fuel['sigma']),
+                                    g(fuel['h']), g(fuel['Mx']), M_used)
     else:
         co = rothermel_coeffs(fuel, M)
 
@@ -346,7 +358,7 @@ def simulate(H=220, W=320, DX=25.0,
     return dict(T=T_np, z=z, slope_tan=slope_tan, head_ros_ms=head_ros_ms,
                 theta_max=theta_max, ecc=ecc, DX=DX, H=H, W=W,
                 ignition=(gi, gj), wind_ms=wind_ms_disp, wind_from_deg=wind_deg_disp,
-                wind_speed_field=wind_speed_field,
+                wind_speed_field=wind_speed_field, M_field=M_field,
                 fuel=fuel, M=M, wall=wall, backend='MLX' if be.mlx else 'NumPy',
                 sweeps=done, burnable=burnable, fuel_code=fuel_code)
 
@@ -489,6 +501,8 @@ def make_figures(r, out_prefix='output/fire_ca', note=None):
     else:
         fid = [k for k, v in FUEL_MODELS.items() if v is r['fuel']][0]
         fuel_label = f"FM{fid} {r['fuel']['name']}"
+    m_label = (f"M≈{np.nanmean(r['M_field'])*100:.0f}% spatial"
+               if r.get('M_field') is not None else f"M={r['M']*100:.0f}%")
 
     fig, ax = plt.subplots(1, 2, figsize=(15, 6.2), facecolor='white')
 
@@ -517,7 +531,7 @@ def make_figures(r, out_prefix='output/fire_ca', note=None):
     cb.set_label('fire arrival time [min]')
     ax[0].set(xlabel='East [km]', ylabel='North [km]',
               title=f"Fire-spread isochrones on terrain  ({r['backend']} CA)\n"
-                    f"{fuel_label}, M={r['M']*100:.0f}%, "
+                    f"{fuel_label}, {m_label}, "
                     f"{H}×{W} cells @ {DX:.0f} m")
     ax[0].legend(loc='lower right', fontsize=8)
 

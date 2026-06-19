@@ -26,9 +26,11 @@ with a NumPy fallback everywhere.
 | `02_fire/real_terrain.py` | Real **USGS 3DEP** bare-earth DEM via the ImageServer REST API (pyproj + Pillow, no GDAL). |
 | `02_fire/hrrr_wind.py` | Real **NOAA HRRR** 10 m wind via [Herbie](https://herbie.readthedocs.io), converted to a Rothermel mid-flame wind. |
 | `02_fire/real_fuel.py` | Real **LANDFIRE FBFM40** fuel models (all 40 Scott & Burgan 2005 models + nonburnable firebreaks). |
+| `02_fire/fuel_moisture.py` | Spatial **dead-fuel moisture** from real HRRR 2 m weather × terrain microclimate (elevation lapse + aspect heat load; EMC via Simard 1968). |
 | `02_fire/terrain_wind.py` | **Mass-conserving terrain wind downscaling** (the WindNinja core) — solves ∇·(d∇φ)=∇·(dV₀) by conjugate gradient so the flow follows the real DEM. |
-| `02_fire/fire_real.py` | Fire CA on real wind **+** real terrain **+** real fuel for a real place/time. |
+| `02_fire/fire_real.py` | Fire CA on **all-real** inputs — real wind, terrain, fuel, and moisture for a real place/time. |
 | `02_fire/fire_terrain_wind.py` | Uniform vs. terrain-downscaled wind, side by side. |
+| `02_fire/fire_moisture.py` | Spatial vs. uniform fuel moisture (isolates the terrain-microclimate effect). |
 | `02_fire/progressive_res.py` | Resolution study: the same real-data fire at 90→10 m, with the MLX-vs-NumPy crossover. |
 | `03_swarm/swarm_core.py` | 3-D boids physics (separation · alignment · fire-tracking · arc-index spread · tangential patrol · altitude PD). NumPy reference **and** MLX port, numerically validated. |
 | `03_swarm/boids_swarm_3d.py` | 150-drone 3-D swarm: deploy from a base, self-organise to blanket a fire perimeter (matplotlib Axes3D). |
@@ -86,15 +88,17 @@ and cached locally; nothing proprietary is redistributed here.
 ## Status
 
 Real-data layers wired in: **wind** (HRRR + mass-conserving terrain downscaling), **terrain** (3DEP),
-**fuel** (LANDFIRE). Honestly remaining synthetic / simplified:
+**fuel** (LANDFIRE FBFM40), **fuel moisture** (HRRR 2 m weather × terrain microclimate). Honestly
+remaining simplified:
 
-- **Fuel moisture** is uniform (a spatial field from NFMD or HRRR temperature/RH is the next step).
 - **Wind is a single time snapshot** — time-varying wind needs a time-stepping front model, not the
   current static min-arrival-time relaxation.
-- The fuel single-class reduction assumes fire-season herbaceous curing (documented in `real_fuel.py`).
+- The fuel single-class reduction assumes fire-season herbaceous curing (documented in `real_fuel.py`);
+  the moisture aspect heat-load is a parameterised offset (documented in `fuel_moisture.py`).
 
 ## License
 
-Research / educational use. See `LICENSE` if present, otherwise all rights reserved by the author.
+[MIT](LICENSE) © 2026 Michael Ray Gregory. The bundled public datasets (HRRR, 3DEP, LANDFIRE) are
+U.S. public-domain / open data under their own terms.
 
 🤖 Simulation suite developed with [Claude Code](https://claude.com/claude-code).
