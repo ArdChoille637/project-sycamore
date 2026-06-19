@@ -2,7 +2,11 @@
 # Project Sycamore performance launcher — P-core scheduling + optimal Accelerate
 # threads. Usage:  ./run 02_fire/fire_real.py [args...]
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PY="${SYC_PY:-$HOME/ds/bin/python}"
+# Interpreter: $SYC_PY if set, else the author's ~/ds venv if present, else the
+# current environment's python (works after `pip install -r requirements.txt`).
+if [ -n "$SYC_PY" ]; then PY="$SYC_PY"
+elif [ -x "$HOME/ds/bin/python" ]; then PY="$HOME/ds/bin/python"
+else PY="$(command -v python3 || command -v python)"; fi
 export VECLIB_MAXIMUM_THREADS="${VECLIB_MAXIMUM_THREADS:-8}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-8}"

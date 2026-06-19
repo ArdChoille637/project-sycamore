@@ -241,6 +241,14 @@ def simulate(H=220, W=320, DX=25.0,
     else:
         co = rothermel_coeffs(fuel, M)
 
+    # Cells wetter than their moisture of extinction can't carry fire — fold this
+    # into the burnable mask so spatial moisture forms true wet firebreaks (head_ros
+    # → 0 alone leaves finite travel times, so the fire could otherwise cross them).
+    if moisture_fn is not None:
+        Mx_used = ff['Mx'] if fuel_fn is not None else fuel['Mx']
+        wet = np.asarray(M_used) >= np.asarray(Mx_used)
+        burnable = (~wet) if burnable is None else (np.asarray(burnable) & ~wet)
+
     # slope magnitude + upslope direction (steepest ascent = +grad)
     slope_tan = np.hypot(dzdx, dzdy)                      # rise/run
 
