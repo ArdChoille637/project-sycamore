@@ -21,6 +21,10 @@ with a NumPy fallback everywhere.
 | Module | What it does |
 |---|---|
 | `01_aero/samara_bem.py` | Blade-element-momentum autorotation solver for the samara airframe (descent rate, RPM, pitch schedule for autorotation equilibrium). |
+| `05_cfd/lbm_mlx.py` | **D2Q9 Lattice-Boltzmann** CFD core (MLX/Metal GPU, NumPy fallback) — a native high-fidelity aero path that resolves the leading-edge vortex the BEM model can't. Streaming = array roll, collision = element-wise: the workload Apple Silicon accelerates well. |
+| `05_cfd/lbm_validate.py` | Lid-driven cavity validation vs **Ghia et al. (1982)** — centreline RMSE ≈ 0.006 of lid speed. |
+| `05_cfd/lbm_cylinder.py` | Flow past a cylinder — Kármán vortex street + momentum-exchange forces (qualitative; St/Cd elevated by channel confinement). |
+| `05_cfd/lbm_samara.py` | Samara section at high angle of attack — the **leading-edge vortex** the attached-flow BEM model omits. |
 | `02_fire/rothermel.py` | Rothermel (1972) surface-fire rate-of-spread + Anderson fuel models + Huygens elliptical perimeter growth. |
 | `02_fire/rothermel_ca.py` | **Rothermel cellular automaton** — the point model turned into a spatial fire over terrain. Per-cell wind⊕slope ellipse spread; fire front as a GPU min-arrival-time relaxation. Spatial fuel + spatial wind aware. |
 | `02_fire/real_terrain.py` | Real **USGS 3DEP** bare-earth DEM via the ImageServer REST API (pyproj + Pillow, no GDAL). |
