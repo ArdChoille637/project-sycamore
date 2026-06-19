@@ -273,6 +273,7 @@ def couple_fire_atmosphere(H=240, W=320, DX=30.0, U0_ms=2.5, from_deg=270.0,
     t_star = _time_at_count(Tamb, n_star)                        # snapshot fire-time (isolated)
     burning = np.isfinite(Tamb) & (Tamb <= t_star)
     intensity = np.nan_to_num(base['head_ros_ms'])
+    drive_burning, drive_intensity = burning, intensity
 
     per_iter = [dict(it=0, burned=int(burning.sum()), tag='ambient')]
     r = base; Tcoup = Tamb; prev = int(burning.sum())
@@ -283,6 +284,7 @@ def couple_fire_atmosphere(H=240, W=320, DX=30.0, U0_ms=2.5, from_deg=270.0,
                                     terrain=terrain)
         r = rc.simulate(wind_fn=wind_fn, **base_kw)
         Tcoup = r['T']
+        drive_burning, drive_intensity = burning, intensity    # the footprint that PRODUCED this Tcoup
         new_burning = np.isfinite(Tcoup) & (Tcoup <= t_star)    # footprint at the SAME snapshot time
         nb = int(new_burning.sum())
         dburn = abs(nb - prev) / max(prev, 1)
@@ -304,7 +306,9 @@ def couple_fire_atmosphere(H=240, W=320, DX=30.0, U0_ms=2.5, from_deg=270.0,
     if verbose and mode == 'iterated' and not converged:
         print(f"  ⚠ Picard hit K={K} without saturating (last Δ {dburn*100:.2f}% — still oscillating)")
     z = base['z']
-    du, dv = fire_indraft_scaled(z, DX, burning, intensity, peak_indraft)
+    # the indraft that ACTUALLY drove the returned coupled run (drive_*), not the next Picard
+    # wind built from the post-loop footprint — matters for oneway / non-converged runs.
+    du, dv = fire_indraft_scaled(z, DX, drive_burning, drive_intensity, peak_indraft)
     return dict(ambient=base, coupled=r, Tamb=Tamb, Tcoup=Tcoup, per_iter=per_iter,
                 converged=converged,
                 peak_indraft=peak_indraft, R_LBM=R, t_star=t_star, decay_radii=decay_radii,
@@ -385,11 +389,12 @@ def run_demo(mode='iterated', verbose=True, figure=True):
                                  zr, 0.0, terrain=True)(res['z'], zr, zr, res['DX'])
     res['null_ok'] = bool(np.array_equal(a_s, c_s) and np.array_equal(a_f, c_f))
     if verbose:
-        print(f"\nSpread signature at t={sig['t']:.0f} min ({'isolated' if sig['isolated'] else 'NOT isolated!'} "
+        print(f"\nSpread signature at t={sig['t']/3600:.1f} h ({'isolated' if sig['isolated'] else 'NOT isolated!'} "
               f"fire, coupled vs ambient), converged={res['converged']}:")
         print(f"  burned area:    {sig['amb_area']} → {sig['cou_area']} cells ({sig['d_area_pct']:+.1f}%, incl. backing)")
         print(f"  head reach (E): {sig['amb_head']} → {sig['cou_head']} cells ({sig['d_head_pct']:+.1f}%)")
         print(f"  crosswind width:{sig['amb_wid']} → {sig['cou_wid']} cells ({sig['d_wid_pct']:+.1f}%)")
+        print(f"  median |Δarrival| over the ellipse = {sig['median_dT']/60:.0f} min")
         print(f"  null control (peak=0 → ambient wind): {res['null_ok']}; foundational checks: {res['checks_ok']}")
         print(f"  → the steady indraft RETARDS the fire — flanks most (lateral convergence), head less;")
         print(f"    NOT unsteady pyroconvective acceleration (out of scope).")
@@ -420,8 +425,9 @@ def make_coupling_figure(res, out='output/fire_coupling.png'):
     ax[0].set_title(f"Fire at a fixed snapshot — ambient (orange fill) vs coupled (red)\n"
                     f"the indraft (blue) retards the fire: width {sig['d_wid_pct']:+.0f}%, head {sig['d_head_pct']:+.0f}%")
 
-    # Panel 2 — Δarrival: where the feedback delays the fire (flanks), in hours
-    dT = sig['dT'] / 60.0                                                     # → hours
+    # Panel 2 — Δarrival: where the feedback delays the fire (flanks), in hours.
+    # rothermel_ca arrival times are in SECONDS → /3600 for hours.
+    dT = sig['dT'] / 3600.0                                                   # seconds → hours
     lim = float(np.nanpercentile(np.abs(dT), 97))
     im = ax[1].imshow(dT, origin='lower', cmap='RdBu_r', vmin=-lim, vmax=lim, extent=ext, aspect='auto')
     fig.colorbar(im, ax=ax[1], shrink=0.82).set_label('Δarrival  T_amb − T_coupled  [h]')
