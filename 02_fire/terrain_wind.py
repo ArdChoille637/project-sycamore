@@ -50,10 +50,9 @@ def _applyA(phi, dE, dW, dN, dS, DX2):
 def poisson_cg(b, depth, DX, tol=1e-6, max_iter=4000):
     """Solve  A φ = b  for the SPD operator  A = −∇·(depth ∇·)  with Dirichlet φ=0.
 
-    Shared by the terrain-downscaling solve and the fire-induced-indraft solve, so
-    both use one validated CG. `depth` is the (H,W) flow-layer depth (face-averaged
-    internally); `b`'s border is zeroed to enforce φ=0 on the boundary. Returns
-    (φ, iters, relative_residual)."""
+    Shared by the terrain-downscaling solve and the fire-induced-indraft solve, so both use
+    one validated CG. `depth` is the (H,W) flow-layer depth (face-averaged internally); `b`'s
+    border is zeroed to enforce φ=0 on the boundary. Returns (φ, iters, relative_residual)."""
     DX2 = DX*DX
     dE, dW, dN, dS = _faces(np.asarray(depth, 'f8'))
     b = np.asarray(b, 'f8').copy()
@@ -99,7 +98,7 @@ def downscale_wind(z, DX, U0_ms, from_deg, H_layer=None, tol=1e-6, max_iter=4000
 
     # RHS = ∇·(d V0) = u0 ∂d/∂x + v0 ∂d/∂y = −(u0 dzdx + v0 dzdy);  solve Aφ = b, A=−L, b=−RHS
     b = (u0*dzdx + v0*dzdy)
-    phi, it, resid = poisson_cg(b, d, DX, tol, max_iter)
+    phi, it, resid = poisson_cg(b, d, DX, tol=tol, max_iter=max_iter)
 
     # corrected wind  V = V0 − ∇φ
     dphidy, dphidx = np.gradient(phi, DX)

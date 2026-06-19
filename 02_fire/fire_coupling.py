@@ -9,20 +9,25 @@ Rothermel CA never sees this. Here we add it, mass-consistently, by reusing the 
 same variable-coefficient Poisson solver the terrain-wind downscaler already uses:
 
     a fire is a distributed mass SINK S(x,y) over the burning region.
-    Shallow surface layer, depth h_s:  ∇·(h_s V) = −S   (S>0: mass leaves upward)
-    Helmholtz:  V = −∇φ   ⇒   −∇·(h_s ∇φ) = −S   ⇒   A φ = −S
-    (A = −∇·(h_s ∇·), the SAME SPD operator terrain_wind.poisson_cg solves.)
+    Continuity:  ∇·V = −S   (S>0: surface air converges and is lofted into the plume)
+    Helmholtz:   V = −∇φ   ⇒   −∇²φ = −S   ⇒   A φ = −S
+    (A = −∇·(∇·), the SAME SPD operator terrain_wind.poisson_cg solves.)
 
 The RHS sign is −S, NOT +S: +S would drive an OUTdraft (air blown away from the
 fire), the opposite of the physics. validate_sign() asserts the induced flow points
-inward, as a permanent guard on this.
+inward (and conserves mass, net inflow = sink Q) — a permanent guard on this.
 
 Honest scope (see HONEST_SCOPE):
   RESOLVED      — the 3-D LBM buoyant plume and its true near-ground indraft (lbm3d_plume).
-  PARAMETERIZED — the depth-averaged potential-flow surface indraft (this module).
-  VALIDATED     — the parameterized indraft's peak/ambient ratio + decay vs the resolved
-                  LBM near-ground indraft (calibrate_indraft_from_plume / validate checks).
-  NOT claimed   — an absolute, field-validated pyroconvective spread rate.
+  PARAMETERIZED — the depth-averaged potential-flow surface indraft (this module). Its peak
+                  is anchored to the LBM indraft/ambient ratio; its reach is the 2-D potential-
+                  flow reach (∝ footprint size, ~1/r) — BROADER than the resolved LBM indraft,
+                  the known limitation of a depth-averaged closure.
+  VALIDATED     — the parameterized indraft's peak/ambient ratio vs the resolved LBM near-
+                  ground indraft; inward sign; mass conservation; a no-indraft null control.
+  NOT claimed   — that the 2-D reach matches the LBM, nor an absolute field-validated
+                  pyroconvective spread rate (head ACCELERATION is unsteady plume-momentum,
+                  out of scope; this captures the steady kinematic lateral convergence).
 
     ~/ds/bin/python 02_fire/fire_coupling.py --checks      # sign + null + mass conservation
     ~/ds/bin/python 02_fire/fire_coupling.py --calibrate   # extract indraft ratio from the LBM plume
@@ -43,19 +48,21 @@ HONEST_SCOPE = __doc__
 
 # ── fire-induced surface indraft: a mass sink in the WindNinja Poisson ────────
 
-def solve_fire_indraft(z, DX, S, h_s):
-    """Raw, mass-consistent fire indraft from a surface mass-sink S (>0 over the fire).
+def solve_fire_indraft(z, DX, S):
+    """Mass-consistent fire indraft from a surface mass-sink S (>0 over the fire). Solves the
+    pure Poisson  A φ = −S  (A = −∇·(∇·), Dirichlet φ=0 at the domain edge), then V = −∇φ.
+    The −S sign makes the flow CONVERGE into the fire; ∇·V = −S so the inflow exactly feeds
+    the sink (mass conserved). Returns (du, dv, diag).
 
-    Solves  A φ = −S  on a shallow uniform surface layer of depth h_s (A = −∇·(h_s∇·)),
-    then V_fire = −∇φ. The −S sign makes the flow CONVERGE into the fire. Returns
-    (du, dv, diag); du,dv are the convergent perturbation components (East, North)."""
+    The depth is uniform (=1) and is absorbed by the downstream peak-scaling, so it sets no
+    length scale; the indraft's reach is the potential-flow reach (∝ the fire-footprint size,
+    decaying ~1/r in 2-D). That reach is BROADER than the resolved-LBM near-ground indraft —
+    the known limitation of a depth-averaged 2-D closure (disclosed in HONEST_SCOPE)."""
     z = np.asarray(z, 'f8')
-    depth = np.full_like(z, float(h_s))
+    depth = np.ones_like(z)
     phi, it, resid = poisson_cg(-np.asarray(S, 'f8'), depth, DX)
     dphidy, dphidx = np.gradient(phi, DX)
-    du = -dphidx
-    dv = -dphidy
-    return du, dv, dict(iters=it, resid=resid, depth=depth, phi=phi)
+    return -dphidx, -dphidy, dict(iters=it, resid=resid, phi=phi)
 
 
 def build_sink(burning, intensity):
@@ -68,16 +75,16 @@ def build_sink(burning, intensity):
     return np.where(burning, intensity, 0.0)
 
 
-def fire_indraft_scaled(z, DX, burning, intensity, h_s, peak_indraft):
-    """Fire indraft (du,dv) [m/s], linearly scaled so its peak speed == peak_indraft.
-    Peak anchored to the LBM-calibrated indraft/ambient ratio × ambient wind; the
-    spatial structure/decay comes from the mass-sink Poisson over the fire footprint."""
+def fire_indraft_scaled(z, DX, burning, intensity, peak_indraft):
+    """Fire indraft (du,dv) [m/s], scaled so its peak speed == peak_indraft. Peak anchored to
+    the LBM indraft/ambient ratio × ambient wind; the spatial structure is the mass-conserving
+    potential flow over the fire footprint. Empty fire or zero peak → no indraft."""
     z = np.asarray(z, 'f8')
     S = build_sink(burning, intensity)
     if S.max() <= 0 or peak_indraft <= 0:
         zr = np.zeros_like(z)
         return zr, zr
-    du, dv, _ = solve_fire_indraft(z, DX, S, h_s)
+    du, dv, _ = solve_fire_indraft(z, DX, S)
     peak = float(np.hypot(du, dv).max())
     if peak > 1e-12:
         s = peak_indraft / peak
@@ -99,14 +106,14 @@ def _ambient_uv(z, DX, U0_ms, from_deg, terrain, H_layer):
     return np.full_like(z, U0_ms*np.sin(to)), np.full_like(z, U0_ms*np.cos(to))
 
 
-def make_wind_coupled(U0_ms, from_deg, burning, intensity, peak_indraft, h_s=40.0,
+def make_wind_coupled(U0_ms, from_deg, burning, intensity, peak_indraft,
                       terrain=True, H_layer=None):
     """wind_fn(z,dzdx,dzdy,DX) → (speed, from_deg): terrain-corrected ambient wind PLUS
     the scaled fire indraft. `burning`/`intensity` are the fire state from the previous
     Picard iteration. peak_indraft=0 (or empty fire) recovers the pure ambient wind."""
     def _fn(z, dzdx, dzdy, DX):
         u, v = _ambient_uv(z, DX, U0_ms, from_deg, terrain, H_layer)
-        du, dv = fire_indraft_scaled(z, DX, burning, intensity, h_s, peak_indraft)
+        du, dv = fire_indraft_scaled(z, DX, burning, intensity, peak_indraft)
         u = u + du
         v = v + dv
         speed = np.hypot(u, v)
@@ -117,43 +124,43 @@ def make_wind_coupled(U0_ms, from_deg, burning, intensity, peak_indraft, h_s=40.
 
 # ── CHECK 1 + CHECK 2: null limit, mass conservation, and the INWARD-FLOW SIGN ─
 
-def validate_sign(H=120, W=160, DX=25.0, h_s=40.0):
+def validate_sign(H=140, W=180, DX=25.0):
     """Foundational guards on the mass-sink solve (no fire model, no CA — pure operator).
 
     CHECK 1 (null): an empty sink gives an identically-zero indraft.
-    CHECK 2 (mass + SIGN): a single circular sink on a flat domain must (a) reconstruct
-       the sink it was built from to CG tolerance (mass conservation) and, critically,
-       (b) drive flow INWARD (a sink, not a source) — the guard on the −S vs +S sign."""
+    CHECK 2 (mass + SIGN): a single circular sink on a flat domain must (a) solve to CG
+       tolerance with the net horizontal inflow equal to the total sink Q (mass conservation,
+       ∇·V=−S — the inflow exactly feeds the column) and, critically, (b) drive flow INWARD
+       (a sink, not a source) — the permanent guard on the −S vs +S sign."""
     z = np.zeros((H, W), 'f8')
 
     # CHECK 1 — null limit
-    du0, dv0 = fire_indraft_scaled(z, DX, np.zeros((H, W), bool), np.zeros((H, W)), h_s, 3.0)
+    du0, dv0 = fire_indraft_scaled(z, DX, np.zeros((H, W), bool), np.zeros((H, W)), 3.0)
     null_ok = float(np.abs(du0).max() + np.abs(dv0).max()) == 0.0
 
     # CHECK 2 — a circular sink: S = w0 over a disk
     yy, xx = np.mgrid[0:H, 0:W]
-    ci, cj, R = H/2, W/2, 12.0
+    ci, cj, R = H/2, W/2, 10.0
     disk = ((xx-cj)**2 + (yy-ci)**2) < R**2
-    w0 = 2.0                                              # arbitrary sink strength [m/s]
+    w0 = 2.0
     S = np.where(disk, w0, 0.0)
-    du, dv, dg = solve_fire_indraft(z, DX, S, h_s)
+    du, dv, dg = solve_fire_indraft(z, DX, S)
 
-    # (a) mass conservation. The exact guarantee is the SOLVE residual ‖Aφ−(−S)‖/‖S‖ in the
-    #     operator's own finite-volume norm (CG drives it below tol). As a physical sanity,
-    #     the net reconstructed inflow equals the total sink Q (divergence theorem); the
-    #     POINTWISE central-difference reconstruction differs from the FV stencil at the disk
-    #     edge, so only the net flux is meaningful there.
+    # (a) mass conservation: the SOLVE residual is the exact operator-norm guarantee; the net
+    #     reconstructed inflow equals the total sink Q (divergence theorem). The pointwise
+    #     central-difference reconstruction differs from the FV stencil at the disk edge, so
+    #     only the net flux is meaningful.
     resid = dg['resid']
-    Q = float(S.sum()) * DX*DX                            # total sink (volume flux) [m³/s]
+    Q = float(S.sum()) * DX*DX
     intr = (slice(1, H-1), slice(1, W-1))
-    net_conv = float((-_div(h_s*du, h_s*dv, DX))[intr].sum()) * DX*DX
+    net_conv = float((-_div(du, dv, DX))[intr].sum()) * DX*DX
     rel_net = abs(net_conv - Q) / max(Q, 1e-12)
     mass_ok = resid < 1e-4 and rel_net < 0.05
 
     # (b) SIGN: the radial component of V on a ring around the disk must be INWARD (<0)
     ring = (((xx-cj)**2 + (yy-ci)**2) > (1.6*R)**2) & (((xx-cj)**2 + (yy-ci)**2) < (2.2*R)**2)
     rxu = (xx-cj); ryu = (yy-ci); rn = np.hypot(rxu, ryu) + 1e-9
-    v_radial = (du*rxu + dv*ryu) / rn                    # >0 = outward, <0 = inward
+    v_radial = (du*rxu + dv*ryu) / rn
     mean_radial = float(v_radial[ring].mean())
     inward = mean_radial < 0
 
@@ -239,7 +246,7 @@ def _time_at_count(T, n):
 
 def couple_fire_atmosphere(H=240, W=320, DX=30.0, U0_ms=2.5, from_deg=270.0,
                            ignition=(0.5, 0.30), fuel=rc.FUEL_MODELS[2], M=0.06,
-                           terrain_fn=None, h_s=40.0, K=6, n_star=4500,
+                           terrain_fn=None, K=6, n_star=4500,
                            calib=None, mode='iterated', verbose=True):
     """Two-way coupling as a Picard loop on the steady CA: run CA → burning footprint at a
     snapshot (an ISOLATED early fire of n_star cells) → fire indraft → re-run CA → repeat.
@@ -249,13 +256,13 @@ def couple_fire_atmosphere(H=240, W=320, DX=30.0, U0_ms=2.5, from_deg=270.0,
     = a single indraft solve from the ambient footprint."""
     if calib is None:
         calib = calibrate_indraft_from_plume(verbose=False)
-    R = calib['R_LBM']; peak_indraft = R * U0_ms
+    R = calib['R_LBM']; peak_indraft = R * U0_ms; decay_radii = calib['decay_radii']
     terrain = terrain_fn is not None
     base_kw = dict(H=H, W=W, DX=DX, fuel=fuel, M=M, ignition=ignition,
                    wind_ms=U0_ms, wind_from_deg=from_deg, terrain_fn=terrain_fn, use_mlx=True)
 
     amb_wind = make_wind_coupled(U0_ms, from_deg, np.zeros((H, W), bool), np.zeros((H, W)),
-                                 peak_indraft=0.0, h_s=h_s, terrain=terrain)
+                                 peak_indraft=0.0, terrain=terrain)
     base = rc.simulate(wind_fn=amb_wind, **base_kw)
     Tamb = base['T']
     t_star = _time_at_count(Tamb, n_star)                        # snapshot fire-time (isolated)
@@ -267,7 +274,7 @@ def couple_fire_atmosphere(H=240, W=320, DX=30.0, U0_ms=2.5, from_deg=270.0,
     K = 1 if mode == 'oneway' else K
     for k in range(1, K+1):
         wind_fn = make_wind_coupled(U0_ms, from_deg, burning, intensity, peak_indraft,
-                                    h_s=h_s, terrain=terrain)
+                                    terrain=terrain)
         r = rc.simulate(wind_fn=wind_fn, **base_kw)
         Tcoup = r['T']
         new_burning = np.isfinite(Tcoup) & (Tcoup <= t_star)    # footprint at the SAME snapshot time
@@ -282,10 +289,10 @@ def couple_fire_atmosphere(H=240, W=320, DX=30.0, U0_ms=2.5, from_deg=270.0,
             break
         prev = nb
     z = base['z']
-    du, dv = fire_indraft_scaled(z, DX, burning, intensity, h_s, peak_indraft)
+    du, dv = fire_indraft_scaled(z, DX, burning, intensity, peak_indraft)
     return dict(ambient=base, coupled=r, Tamb=Tamb, Tcoup=Tcoup, per_iter=per_iter,
-                peak_indraft=peak_indraft, R_LBM=R, t_star=t_star, h_s=h_s, U0_ms=U0_ms,
-                from_deg=from_deg, DX=DX, calib=calib, burning_final=burning,
+                peak_indraft=peak_indraft, R_LBM=R, t_star=t_star, decay_radii=decay_radii,
+                U0_ms=U0_ms, from_deg=from_deg, DX=DX, calib=calib, burning_final=burning,
                 indraft=(du, dv), z=z)
 
 
@@ -324,20 +331,20 @@ def _signature(res, n_meas=9000):
                 median_dT=float(np.nanmedian(np.abs(dT))), dT=dT)
 
 
-def run_demo(h_s=40.0, mode='iterated', verbose=True, figure=True):
+def run_demo(mode='iterated', verbose=True, figure=True):
     """Self-contained coupling demo: FLAT terrain + uniform fuel + uniform wind, so the only
     wind structure is the ambient ⊕ the fire-induced indraft. Domain large enough that the
     measured fire stays clear of the boundary. Returns the result dict."""
     calib = calibrate_indraft_from_plume(verbose=verbose)
     if verbose:
         print(f"\nCoupling demo (flat terrain, uniform fuel): indraft peak = "
-              f"{calib['R_LBM']:.2f} × ambient, mode={mode}")
+              f"{calib['R_LBM']:.2f} × ambient, reach {calib['decay_radii']:.1f} fire-radii, mode={mode}")
     # Weak ambient wind (2.5 m/s): the plume-dominated regime where the fire-induced indraft
     # is a LARGE relative perturbation. In a strong wind-driven fire the same indraft is a
     # small fraction of the ambient and the effect nearly vanishes (the correct dependence).
     res = couple_fire_atmosphere(H=240, W=320, DX=30.0, U0_ms=2.5, from_deg=270.0,
                                  ignition=(0.5, 0.30), terrain_fn=flat_terrain,
-                                 h_s=h_s, mode=mode, n_star=4500, calib=calib, verbose=verbose)
+                                 mode=mode, n_star=4500, calib=calib, verbose=verbose)
     sig = _signature(res); res['sig'] = sig
     if verbose:
         print(f"\nSpread signature at t={sig['t']:.0f} min (isolated fire, coupled vs ambient):")
