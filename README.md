@@ -75,6 +75,8 @@ python perf.py --audit            # report cores + a P-core/E-core sanity benchm
 - **A QoS bump** (`pthread_set_qos_class_self_np` → `USER_INITIATED`) pulls the process back onto the
   P-cores under a *soft* low-QoS launch (a UTILITY parent recovered 1392→1750 GFLOPS). It can't escape
   a *hard* `background` clamp — nothing can.
+- **Interpreter:** `./run` uses the active environment's `python3` by default (works after
+  `pip install -r requirements.txt`); set `SYC_PY=/path/to/python` to point at a specific venv.
 
 Honest scope: the genuinely heavy compute is already GPU-parallel via MLX, and the remaining CPU
 paths (the BEM continuation, the wind CG, the relaxation sweeps) are *sequential* — not parallelisable

@@ -86,6 +86,7 @@ class LBM:
         self.feq_in = None
         self.outlet = False                              # right zero-gradient outlet
         self._links = None                               # cached obstacle boundary links
+        self._bc = None                                  # cached backend solid/wall arrays
         # initialise at rest, rho = 1
         be = self.be
         rho0 = be.arr(np.ones((ny, nx)))
@@ -99,15 +100,18 @@ class LBM:
         if bottom: self.solid[0, :] = True
         if left:   self.solid[:, 0] = True
         if right:  self.solid[:, -1] = True
+        self._bc = None
 
     def set_moving_wall(self, mask, ux, uy=0.0):
         self.solid |= mask
         self.uw[0][mask] = ux
         self.uw[1][mask] = uy
+        self._bc = None
 
     def set_obstacle(self, mask):
         self.solid |= mask
         self.obstacle |= mask
+        self._bc = None
 
     def set_inlet(self, u):
         """Left-column equilibrium-velocity inlet: u_x = u, u_y = 0, rho = 1."""
@@ -129,9 +133,12 @@ class LBM:
         feq = equilibrium(be, rho, ux, uy)
         fout = f - self.omega*(f - feq)
 
-        # full-way bounce-back on solids, with moving-wall momentum correction
-        solid = be.arr(self.solid.astype('f4'))
-        uwx = be.arr(self.uw[0]); uwy = be.arr(self.uw[1])
+        # full-way bounce-back on solids, with moving-wall momentum correction.
+        # The masks are static during a run → build the backend arrays once and cache
+        # them (rebuilt only when walls/obstacle/moving-wall config changes).
+        if self._bc is None:
+            self._bc = (be.arr(self.solid.astype('f4')), be.arr(self.uw[0]), be.arr(self.uw[1]))
+        solid, uwx, uwy = self._bc
         parts = []
         for i in range(9):
             bb = _gather_opp(f, i) + 6.0*float(W9[i])*(CX[i]*uwx + CY[i]*uwy)
