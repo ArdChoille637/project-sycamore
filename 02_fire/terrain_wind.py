@@ -47,6 +47,39 @@ def _applyA(phi, dE, dW, dN, dS, DX2):
     return A
 
 
+def poisson_cg(b, depth, DX, tol=1e-6, max_iter=4000):
+    """Solve  A φ = b  for the SPD operator  A = −∇·(depth ∇·)  with Dirichlet φ=0.
+
+    Shared by the terrain-downscaling solve and the fire-induced-indraft solve, so both use
+    one validated CG. `depth` is the (H,W) flow-layer depth (face-averaged internally); `b`'s
+    border is zeroed to enforce φ=0 on the boundary. Returns (φ, iters, relative_residual)."""
+    DX2 = DX*DX
+    dE, dW, dN, dS = _faces(np.asarray(depth, 'f8'))
+    b = np.asarray(b, 'f8').copy()
+    b[0, :] = 0; b[-1, :] = 0; b[:, 0] = 0; b[:, -1] = 0
+    phi = np.zeros_like(b)
+    r = b - _applyA(phi, dE, dW, dN, dS, DX2)
+    p = r.copy()
+    rs = float(np.sum(r*r))
+    b_norm = max(float(np.sqrt(np.sum(b*b))), 1e-30)
+    resid = float(np.sqrt(rs)/b_norm); it = 0
+    for it in range(1, max_iter+1):
+        Ap = _applyA(p, dE, dW, dN, dS, DX2)
+        denom = float(np.sum(p*Ap))
+        if abs(denom) < 1e-30:
+            break
+        alpha = rs/denom
+        phi += alpha*p
+        r -= alpha*Ap
+        rs_new = float(np.sum(r*r))
+        resid = float(np.sqrt(rs_new)/b_norm)
+        if resid < tol:
+            break
+        p = r + (rs_new/rs)*p
+        rs = rs_new
+    return phi, it, resid
+
+
 def downscale_wind(z, DX, U0_ms, from_deg, H_layer=None, tol=1e-6, max_iter=4000,
                    verbose=False):
     """Mass-conserving terrain wind. Returns (speed_field, from_deg_field)."""
@@ -65,30 +98,7 @@ def downscale_wind(z, DX, U0_ms, from_deg, H_layer=None, tol=1e-6, max_iter=4000
 
     # RHS = ∇·(d V0) = u0 ∂d/∂x + v0 ∂d/∂y = −(u0 dzdx + v0 dzdy);  solve Aφ = b, A=−L, b=−RHS
     b = (u0*dzdx + v0*dzdy)
-    b[0, :] = 0; b[-1, :] = 0; b[:, 0] = 0; b[:, -1] = 0
-    DX2 = DX*DX
-    dE, dW, dN, dS = _faces(d)
-
-    # conjugate gradient
-    phi = np.zeros_like(z)
-    r = b - _applyA(phi, dE, dW, dN, dS, DX2)
-    p = r.copy()
-    rs = float(np.sum(r*r))
-    b_norm = max(float(np.sqrt(np.sum(b*b))), 1e-30)
-    it = 0
-    for it in range(1, max_iter+1):
-        Ap = _applyA(p, dE, dW, dN, dS, DX2)
-        denom = float(np.sum(p*Ap))
-        if abs(denom) < 1e-30:
-            break
-        alpha = rs/denom
-        phi += alpha*p
-        r -= alpha*Ap
-        rs_new = float(np.sum(r*r))
-        if np.sqrt(rs_new)/b_norm < tol:
-            break
-        p = r + (rs_new/rs)*p
-        rs = rs_new
+    phi, it, resid = poisson_cg(b, d, DX, tol=tol, max_iter=max_iter)
 
     # corrected wind  V = V0 − ∇φ
     dphidy, dphidx = np.gradient(phi, DX)
@@ -99,7 +109,7 @@ def downscale_wind(z, DX, U0_ms, from_deg, H_layer=None, tol=1e-6, max_iter=4000
     if verbose:
         # mass-conservation residual of the corrected field (interior)
         flux = _div(d*u, d*v, DX)[1:-1, 1:-1]
-        print(f"  CG {it} iters, residual {np.sqrt(rs_new)/b_norm:.1e}; "
+        print(f"  CG {it} iters, residual {resid:.1e}; "
               f"speed {speed.min():.1f}–{speed.max():.1f} m/s (ambient {U0_ms:.1f}); "
               f"|∇·(dV)| max {np.abs(flux).max():.2e}")
     return speed.astype('f4'), from_deg_field.astype('f4')
