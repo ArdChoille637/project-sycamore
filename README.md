@@ -40,6 +40,7 @@ with a NumPy fallback everywhere.
 | `02_fire/fire_terrain_wind.py` | Uniform vs. terrain-downscaled wind, side by side. |
 | `02_fire/fire_moisture.py` | Spatial vs. uniform fuel moisture (isolates the terrain-microclimate effect). |
 | `02_fire/progressive_res.py` | Resolution study: the same real-data fire at 90→10 m, with the MLX-vs-NumPy crossover. |
+| `02_fire/fire_coupling.py` | **Fire–atmosphere coupling** (the WRF-SFIRE feedback, "a fire makes its own wind") — the fire's own buoyant indraft fed back into the Rothermel wind. A fire is a mass **sink** in the *same* WindNinja Poisson solve (continuity `∇·(h_sV)=−S`), giving a mass-consistent convergent surface wind, Picard-iterated with the CA to a fixed point. The indraft is **calibrated to the resolved 3-D LBM plume** (peak ≈ 0.31× ambient). Validated: inward-sign + mass conservation + a no-indraft null control. Result: the steady kinematic indraft **pinches the flanks** (width −32% in weak wind) — lateral convergence, *not* unsteady pyroconvective acceleration (out of scope). |
 | `03_swarm/swarm_core.py` | 3-D boids physics (separation · alignment · fire-tracking · arc-index spread · tangential patrol · altitude PD). NumPy reference **and** MLX port, numerically validated. |
 | `03_swarm/boids_swarm_3d.py` | 150-drone 3-D swarm: deploy from a base, self-organise to blanket a fire perimeter (matplotlib Axes3D). |
 | `03_swarm/fire_swarm.py` | **Coupled fire ↔ swarm** — the swarm patrols the *live* Rothermel fire front as it grows and advances. |
