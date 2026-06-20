@@ -18,9 +18,15 @@ At steady autorotation two conditions must hold simultaneously:
 
 Solver
 ------
-Two-step sequential approach (more robust than direct 2D system solve):
-  For each Ω in a sweep, find V_d(Ω) via brentq s.t. T(V_d,Ω) = W.
-  Evaluate Q at that operating point.  Find Ω* where Q changes sign.
+The thrust balance T(V_d,Ω)=W is multivalued in V_d, so a plain brentq over
+the whole interval returns an arbitrary root and silently jumps branches as Ω
+varies. Instead we: enumerate ALL T=W roots on a grid, assemble them into
+continuous V_d(Ω) branches by continuation, and locate the autorotation
+equilibrium as the *stable* net-torque zero (Q: driving→braking, dQ/dΩ<0) on a
+single branch. The post-stall polar is C¹-blended so T(V_d) is smooth: a hard
+stall switch produced 5–13 spurious roots and a V_d 4.4→8.8 m/s branch jump at
+the operating Ω, making the old reported equilibrium partly a numerical
+artifact. `solve(m, return_info=True)` returns well-posedness diagnostics.
 
 Pitch geometry note
 -------------------
@@ -61,18 +67,29 @@ dr    = r[1] - r[0]
 c     = c_root + (c_tip - c_root) * (r - r_hub) / (R - r_hub)
 theta = theta_root + (theta_tip - theta_root) * (r - r_hub) / (R - r_hub)
 
-# ── Thin-plate airfoil model with Viterna post-stall ─────────────────────
+# ── Thin-plate airfoil model with Viterna post-stall (C¹-blended) ────────
 # Pre-stall: thin airfoil (2π slope).
 # Post-stall: Viterna (1982) flat-plate extension — CL drops, CD rises sharply.
 # This is essential for the tip-braking region that sustains autorotation.
+#
+# The pre/post branches are joined by a smooth logistic weight rather than a
+# hard `where` switch at ALPHA_STALL. The hard switch put a kink in CL(α) at
+# every spanwise element's stall crossing, which made the summed thrust
+# T(V_d) non-monotonic — at the operating Ω, T(V_d)=W had 5–13 spurious roots
+# and the root-finder branch-jumped (V_d 4.4→8.8 m/s across Ω≈107), so the
+# reported equilibrium was partly a numerical artifact. The blend makes
+# cl_cd C¹ (in fact C∞), so T(V_d) is smooth and the equilibrium is well
+# posed. BLEND→0 recovers the original hard switch.
 ALPHA_STALL = np.deg2rad(10)
-CD_MAX      = 1.2            # flat plate maximum drag coefficient
+CD_MAX      = 1.2             # flat plate maximum drag coefficient
+BLEND       = np.deg2rad(2.0) # stall-transition half-width for C¹ blending
 
 def cl_cd(alpha):
-    """Returns (CL, CD) arrays for the given AoA array [rad]."""
+    """Returns (CL, CD) for AoA [rad], C¹-continuous across stall."""
     sign = np.sign(alpha)
     a    = np.abs(alpha)
-    pre  = a <= ALPHA_STALL
+    # smooth pre→post weight: ~1 below stall, ~0 above, continuous derivative
+    w    = 1.0 / (1.0 + np.exp((a - ALPHA_STALL) / BLEND))
 
     cl_pre  = 2 * np.pi * alpha
     cl_post = sign * (CD_MAX / 2) * np.sin(2 * a)
@@ -80,7 +97,7 @@ def cl_cd(alpha):
     cd_pre  = 0.01 + 0.05 * alpha**2
     cd_post = CD_MAX * np.sin(a)**2 + 0.01 * np.cos(a)**2
 
-    return np.where(pre, cl_pre, cl_post), np.where(pre, cd_pre, cd_post)
+    return w * cl_pre + (1 - w) * cl_post, w * cd_pre + (1 - w) * cd_post
 
 # ── Force integrals at a given operating point ────────────────────────────
 def forces(Vd, Omega):
@@ -94,52 +111,151 @@ def forces(Vd, Omega):
     Q    = N_BLADES * np.sum(r * (q*cl*np.sin(phi) - q*cd*np.cos(phi)) * dr)
     return T, Q
 
-# ── Two-step sequential solver ────────────────────────────────────────────
-def solve(m_kg):
+# ── Thrust-balance root handling (robust, branch-aware) ──────────────────
+# The old solver called brentq on the whole [0.1, 30] interval, which returns
+# *an* arbitrary root and silently jumps branches as Ω varies (the source of
+# the V_d 4.4→8.8 m/s discontinuity). Instead we enumerate ALL T(V_d)=W roots
+# on a grid and select the physical branch = lowest descent rate (the
+# windmill-brake autorotation state); higher-V_d roots are deep-stall states.
+
+def _thrust_curve(Vd_arr, Om, W):
+    """Vectorised T(V_d) − W over a V_d array at fixed Ω (one shot)."""
+    Vd    = np.asarray(Vd_arr)[:, None]          # (nv, 1)
+    Ut    = Om * r[None, :]                       # (1, ne)
+    Veff  = np.sqrt(Ut**2 + Vd**2)
+    phi   = np.arctan2(Vd, Ut)
+    alpha = theta[None, :] - phi
+    cl, cd = cl_cd(alpha)
+    q     = 0.5 * RHO * Veff**2 * c[None, :]
+    T     = N_BLADES * np.sum((q*cl*np.cos(phi) - q*cd*np.sin(phi)) * dr, axis=1)
+    return T - W
+
+def thrust_balance_roots(Om, W, vlo=0.1, vhi=30.0, n=400):
+    """All V_d in [vlo, vhi] with T(V_d, Ω)=W, refined and ascending."""
+    vs = np.linspace(vlo, vhi, n)
+    g  = _thrust_curve(vs, Om, W)
+    roots = []
+    for i in np.where(np.diff(np.sign(g)) != 0)[0]:
+        try:
+            roots.append(brentq(lambda v: forces(v, Om)[0] - W,
+                                 vs[i], vs[i+1], xtol=1e-6))
+        except Exception:
+            pass
+    return np.array(roots)
+
+def vd_physical(Om, W):
+    """Lowest-descent (physical autorotation) V_d root at this Ω, or nan."""
+    roots = thrust_balance_roots(Om, W)
+    return roots[0] if roots.size else np.nan
+
+# ── Branch continuation: assemble continuous V_d(Ω) autorotation branches ─
+def _track_branches(Omegas, W, gap=0.8):
+    """
+    Group the T(V_d)=W roots into continuous V_d(Ω) branches by continuation
+    in Ω (match each root to the nearest active branch tip; unmatched roots
+    seed new branches). Returns a list of (Om_array, Vd_array).
+
+    This is the heart of the well-posedness fix: the thrust balance is
+    multivalued (a slow-descent attached branch, a fast-descent stalled
+    branch, and a spurious near-zero branch that appears at higher Ω), and the
+    physical autorotation branch is the MIDDLE one — not the lowest root. The
+    old single-brentq search could not see this and jumped branches.
+    """
+    branches = []   # each: {'Om':[], 'Vd':[], 'tip':float, 'active':bool}
+    for Om in Omegas:
+        roots = list(thrust_balance_roots(Om, W))
+        used  = [False] * len(roots)
+        for br in branches:
+            if not br['active']:
+                continue
+            best, bd = -1, gap
+            for k, v in enumerate(roots):
+                if used[k]:
+                    continue
+                d = abs(v - br['tip'])
+                if d < bd:
+                    best, bd = k, d
+            if best >= 0:
+                br['Om'].append(Om); br['Vd'].append(roots[best])
+                br['tip'] = roots[best]; used[best] = True
+            else:
+                br['active'] = False
+        for k, v in enumerate(roots):
+            if not used[k]:
+                branches.append({'Om': [Om], 'Vd': [v], 'tip': v, 'active': True})
+    return [(np.array(b['Om']), np.array(b['Vd'])) for b in branches]
+
+# ── Branch-aware autorotation solver ──────────────────────────────────────
+def solve(m_kg, return_info=False):
     """
     Find (V_d*, Omega*) for autorotation at given UAV mass.
-    Returns (V_d, Omega) or (nan, nan) if no solution found.
+
+    The thrust balance T(V_d)=W is multivalued, so its roots are first
+    assembled into continuous branches by continuation (`_track_branches`).
+    The physical autorotation equilibrium is the *stable* net-torque zero on a
+    branch — Q passing from driving (Q>0) to braking (Q<0), i.e. dQ/dΩ<0, a
+    self-correcting RPM. Among such crossings the slowest-descent one is
+    returned. This replaces the old single-brentq search, which returned an
+    arbitrary root and branch-jumped (V_d 4.4→8.8 m/s) at the operating Ω.
+
+    return_info=True also returns a diagnostics dict:
+      n_roots_at_op  — T=W multiplicity at Ω* (context, not a defect)
+      branch_jump    — largest V_d step along the SELECTED branch [m/s]
+      branch_smooth  — bool(branch_jump < 0.5): the tracked branch is continuous
+      dQ_dOmega      — on-branch torque slope at the zero (<0 ⇒ self-correcting)
+      self_correcting, well_posed
     """
     W = m_kg * 9.81
+    Omegas   = np.linspace(20, 300, 280)
+    branches = _track_branches(Omegas, W)
+    nan_out  = (np.nan, np.nan, {}) if return_info else (np.nan, np.nan)
 
-    Omegas = np.linspace(20, 300, 200)
-    Vd_curve = np.full(len(Omegas), np.nan)
-    Q_curve  = np.full(len(Omegas), np.nan)
-
-    for i, Om in enumerate(Omegas):
-        # At this Om, does T(Vd) = W have a solution in [0.1, 30] m/s?
-        try:
-            f_lo = forces(0.1,  Om)[0] - W
-            f_hi = forces(30.0, Om)[0] - W
-            if f_lo * f_hi >= 0:
-                continue                    # no sign change → no root
-            Vd_i = brentq(lambda v: forces(v, Om)[0] - W, 0.1, 30.0, xtol=1e-4)
-            Vd_curve[i] = Vd_i
-            Q_curve[i]  = forces(Vd_i, Om)[1]
-        except Exception:
+    best = None   # (Vd_star, Om_star, dQ_dOm, Om_b, Vd_b)
+    for Om_b, Vd_b in branches:
+        if Om_b.size < 3:
             continue
+        Q_b = np.array([forces(v, om)[1] for om, v in zip(Om_b, Vd_b)])
+        for k in range(Q_b.size - 1):
+            if Q_b[k] > 0.0 >= Q_b[k + 1]:                 # stable driving→braking zero
+                # refine Ω* staying on THIS branch (root nearest the interpolated tip)
+                def _q_branch(om, Om_b=Om_b, Vd_b=Vd_b):
+                    tgt   = np.interp(om, Om_b, Vd_b)
+                    roots = thrust_balance_roots(om, W)
+                    if roots.size == 0:
+                        return np.nan
+                    return forces(roots[np.argmin(np.abs(roots - tgt))], om)[1]
+                try:
+                    Om_star = brentq(_q_branch, Om_b[k], Om_b[k + 1], xtol=1e-4)
+                except Exception:
+                    Om_star = (Om_b[k] - Q_b[k] *
+                               (Om_b[k+1] - Om_b[k]) / (Q_b[k+1] - Q_b[k]))
+                tgt     = np.interp(Om_star, Om_b, Vd_b)
+                roots   = thrust_balance_roots(Om_star, W)
+                Vd_star = float(roots[np.argmin(np.abs(roots - tgt))]) if roots.size else tgt
+                dQ_dOm  = (Q_b[k+1] - Q_b[k]) / (Om_b[k+1] - Om_b[k])
+                if best is None or Vd_star < best[0]:      # slowest-descent stable eq.
+                    best = (Vd_star, Om_star, dQ_dOm, Om_b, Vd_b)
 
-    # Find first sign change in Q
-    valid = ~np.isnan(Q_curve)
-    if valid.sum() < 2:
-        return np.nan, np.nan
+    if best is None:
+        return nan_out
+    Vd_star, Om_star, dQ_dOm, Om_b, Vd_b = best
 
-    idx = np.where(valid)[0]
-    for k in range(len(idx) - 1):
-        i, j = idx[k], idx[k+1]
-        if Q_curve[i] * Q_curve[j] < 0:
-            # Linear interpolate Omega* across the sign change
-            Om_lo, Om_hi = Omegas[i], Omegas[j]
-            Q_lo,  Q_hi  = Q_curve[i], Q_curve[j]
-            Om_star = Om_lo - Q_lo * (Om_hi - Om_lo) / (Q_hi - Q_lo)
-            Vd_star = brentq(lambda v: forces(v, Om_star)[0] - W, 0.1, 30.0, xtol=1e-5)
-            return Vd_star, Om_star
-
-    return np.nan, np.nan
+    if return_info:
+        branch_jump = float(np.max(np.abs(np.diff(Vd_b)))) if Vd_b.size > 1 else 0.0
+        info = {
+            'n_roots_at_op':   int(thrust_balance_roots(Om_star, W).size),
+            'branch_jump':     branch_jump,
+            'branch_smooth':   bool(branch_jump < 0.5),
+            'dQ_dOmega':       float(dQ_dOm),
+            'self_correcting': bool(dQ_dOm < 0),
+            'well_posed':      bool(branch_jump < 0.5 and dQ_dOm < 0),
+        }
+        return Vd_star, Om_star, info
+    return Vd_star, Om_star
 
 # ── Baseline design ───────────────────────────────────────────────────────
 m0 = 0.075   # 75 g baseline UAV
-Vd0, Om0 = solve(m0)
+Vd0, Om0, info0 = solve(m0, return_info=True)
 
 if np.isnan(Vd0):
     print("WARNING: BEM solver did not find an autorotation solution.")
@@ -159,6 +275,15 @@ else:
     print(f"  Disk loading  : {m0*9.81/(np.pi*R**2):.2f} N/m²")
     print(f"  Thrust check  : T = {T0:.4f} N  W = {m0*9.81:.4f} N")
     print(f"  Torque check  : Q = {Q0:.6f} N·m  (target: 0)")
+    print(f"{'─'*52}")
+    print(f"  Well-posedness (Wave-0 fix):")
+    print(f"    T=W roots at op Ω : {info0['n_roots_at_op']}  "
+          f"(equilibrium tracked on the stable branch)")
+    print(f"    branch continuity : ΔV_d ≤ {info0['branch_jump']:.3f} m/s  "
+          f"({'smooth ✓' if info0['branch_smooth'] else 'JUMP ✗'}; was ~4.4 pre-fix)")
+    print(f"    dQ/dΩ at crossing : {info0['dQ_dOmega']:+.2e} N·m/(rad/s)  "
+          f"({'self-correcting ✓' if info0['self_correcting'] else 'divergent ✗'})")
+    print(f"    → equilibrium {'WELL POSED ✓' if info0['well_posed'] else 'still ill-posed ✗'}")
     print(f"{'─'*52}\n")
 
 # ── Parametric sweep: mass 20 g → 200 g ──────────────────────────────────
