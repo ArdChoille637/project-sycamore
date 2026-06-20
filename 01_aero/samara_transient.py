@@ -22,6 +22,13 @@ Deliverables: transition time, altitude lost, peak AoA / root-load overshoot,
 Jacobian eigenvalues (stable-attractor check), and the basin of attraction
 (does the powered state converge to autorotation).
 
+Metric semantics (read before quoting): alt_lost is the TOTAL altitude descended
+during settling (it includes the unavoidable steady V_d*·t_settle, not just
+transient excess). load_overshoot is for the REALISED trajectory and is
+spin-dominated (load ∝ Ω²·r²), so a transition that starts at Ω* shows ≈1.00×
+even though descent/AoA spike — it is not a worst-case structural envelope;
+read peak descent rate and peak AoA alongside it.
+
 Tier: Indicative (inherits the aero forces' tier; the EOM and the asymptote-to-
 equilibrium self-consistency are exact).
 
@@ -49,7 +56,7 @@ def _TQ(Vz, Om, cfg, grid):
 def transition(cfg, mass, Vz0, Om0, eq=None, t_max=40.0, settle_tol=0.02, metrics=True):
     """Integrate engine-cut → autorotation from (V_z0, Ω0). `eq`=(Vd*,Ω*) may be
     passed to avoid re-solving the equilibrium (basin sweeps)."""
-    grid = cfg.grid(); m = mass.m_total; Izz = mass.properties()['I_zz']
+    grid = cfg.grid(); m = mass.m_total; Izz = mass.properties()['I_spin']
     Vd_eq, Om_eq = eq if eq is not None else sb.solve(cfg, m)
 
     def rhs(t, y):
@@ -59,15 +66,25 @@ def transition(cfg, mass, Vz0, Om0, eq=None, t_max=40.0, settle_tol=0.02, metric
 
     sol = solve_ivp(rhs, [0, t_max], [Vz0, Om0], max_step=0.1, rtol=1e-7, atol=1e-9)
     t, Vz, Om = sol.t, sol.y[0], sol.y[1]
-    converged = (abs(Vz[-1]-Vd_eq) < 0.05*Vd_eq) and (abs(Om[-1]-Om_eq) < 0.05*Om_eq)
+    converged = bool(sol.success and abs(Vz[-1]-Vd_eq) < 0.05*Vd_eq
+                     and abs(Om[-1]-Om_eq) < 0.05*Om_eq)
 
     out = dict(t=t, Vz=Vz, Om=Om, Vd_eq=Vd_eq, Om_eq=Om_eq, converged=converged)
     if not metrics:
         return out
 
-    # time to settle within ±settle_tol of BOTH states; altitude descended to then
+    # time to settle within ±settle_tol of BOTH states (first time the band stays
+    # settled); altitude descended to then. NOTE: alt_lost is the TOTAL descent
+    # during settling (it includes the unavoidable steady descent V_d*·t_settle,
+    # not just transient excess) — an operational fail-safe altitude figure.
     band = (np.abs(Vz-Vd_eq) > settle_tol*Vd_eq) | (np.abs(Om-Om_eq) > settle_tol*Om_eq)
-    t_settle = float(t[np.where(band)[0][-1]]) if band.any() else 0.0
+    unsettled = np.where(band)[0]
+    if unsettled.size == 0:
+        t_settle = 0.0
+    elif unsettled[-1] + 1 < len(t):
+        t_settle = float(t[unsettled[-1] + 1])          # first settled sample
+    else:
+        t_settle = float(t[-1])
     in_settle = t <= t_settle
     alt_to_settle = float(np.trapezoid(np.maximum(Vz[in_settle], 0), t[in_settle])) if t_settle > 0 else 0.0
     # peak spanwise AoA and root-bending load during the transient
@@ -93,7 +110,7 @@ def _root_load(Vz, Om, cfg, grid):
 
 def jacobian(cfg, mass):
     """2×2 Jacobian of [dV_z/dt, dΩ/dt] at the equilibrium → eigenvalues."""
-    grid = cfg.grid(); m = mass.m_total; Izz = mass.properties()['I_zz']
+    grid = cfg.grid(); m = mass.m_total; Izz = mass.properties()['I_spin']
     Vd, Om = sb.solve(cfg, m)
     def f(vz, om):
         T, Q = _TQ(vz, om, cfg, grid)
@@ -121,10 +138,10 @@ def basin(cfg, mass, vz_grid=None, om_grid=None, t_max=30.0):
 if __name__ == '__main__':
     cfg = sb.SAMARA
     mass = sm.MassModel(cfg=cfg, m_total=0.075)
-    Izz = mass.properties()['I_zz']
+    Izz = mass.properties()['I_spin']
     Vd_eq, Om_eq = sb.solve(cfg, mass.m_total)
     print(f"Equilibrium (steady BEM): V_d*={Vd_eq:.2f} m/s, Ω*={Om_eq*60/2/np.pi:.0f} RPM, "
-          f"I_zz={Izz*1e4:.2f}e-4 kg·m²")
+          f"I_spin={Izz*1e4:.2f}e-4 kg·m² (about CG)")
 
     # stable-attractor check
     J, eig, _, _ = jacobian(cfg, mass)
@@ -149,10 +166,23 @@ if __name__ == '__main__':
     print(f"  converged: {cold['converged']}   settle {cold['t_settle']:.1f} s   "
           f"altitude {cold['alt_lost']:.1f} m   peak AoA {cold['peak_aoa_deg']:.0f}°")
 
-    # validation: the transient asymptote must match the steady equilibrium
+    # validation (a) self-consistency: the ODE reaches its OWN fixed point (T=W,
+    # Q=0) — the same equations sb.solve() roots, so this is NOT an independent
+    # check (it passes even with I_spin wrong); it only confirms the integrator
+    # converges and the EOM signs are not flipped.
     err = abs(nom['Vz'][-1]-Vd_eq)/Vd_eq
-    print(f"\n[validation] transient asymptote vs steady BEM: ΔV_d={err*100:.2f}%  "
-          f"→ {'PASS ✓' if err < 0.02 and nom['converged'] else 'FAIL ✗'}")
+    # validation (b) INDEPENDENT: the nonlinear spin-decay rate from a perturbed
+    # run must match the linear slow eigenvalue (two different computations).
+    pert = transition(cfg, mass, Vz0=Vd_eq, Om0=1.05*Om_eq, t_max=25.0, metrics=False)
+    dOm = pert['Om'] - Om_eq
+    msk = np.abs(dOm) > 1e-3*Om_eq
+    lam_fit  = float(np.polyfit(pert['t'][msk], np.log(np.abs(dOm[msk])), 1)[0])
+    lam_slow = float(eig.real[np.argmin(np.abs(eig.real))])
+    cross_ok = abs(lam_fit - lam_slow)/abs(lam_slow) < 0.15
+    print(f"\n[validation a · self-consistency] transient reaches its own fixed point: "
+          f"ΔV_d={err*100:.2f}%  (not independent — same T=W,Q=0 equations)")
+    print(f"[validation b · INDEPENDENT] nonlinear spin-decay {lam_fit:.3f}/s vs linear "
+          f"eigenvalue {lam_slow:.3f}/s → {'PASS ✓' if cross_ok else 'FAIL ✗'}")
 
     # basin of attraction
     vz_g, om_g, M, _ = basin(cfg, mass)
