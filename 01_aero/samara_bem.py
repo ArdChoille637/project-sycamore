@@ -29,7 +29,11 @@ Momentum theory gives a per-element induced velocity v_i in the windmilling-
 brake (descent) state: the axial through-flow is U_p = (V_d − v_i)·cosβ (v_i
 SUBTRACTED — the correct descent-state sign), solved against the blade-element
 load with a Prandtl single-blade tip-loss factor F. α = θ + φ (paper sign
-convention), φ = arctan(U_p/U_t), U_t = Ωr.
+convention), φ = arctan(U_p/U_t), U_t = Ωr. The momentum parabola peaks at
+v_i=V_d/2; heavily-loaded elements past that peak (turbulent-wake state) clamp
+to V_d/2 (Glauert/Buhl empirical) rather than dropping induced inflow to zero,
+and v_i is bounded to [0, V_d/2] so it cannot go negative or diverge. The
+descent FBD also fixes the thrust drag-sign: T = L cosφ + D sinφ.
 
 Solver — well posed
 -------------------
@@ -125,13 +129,22 @@ def _state(Vd, Om, cfg, r, c, theta, n_it=15):
             F = np.maximum((2 / np.pi) * np.arccos(np.clip(np.exp(-f), 0.0, 1.0)), 1e-4)
         else:
             F = 1.0
-        # blade-element axial load per unit span
-        dT_be = 0.5 * cfg.rho * U2 * c[None, :] * (cl*np.cos(phi) - cd*np.sin(phi)) * cfg.n_blades
-        # momentum per annulus: dT/dr = 4π ρ r (Vd − v_i) v_i F cosβ  → solve v_i
-        a_   = np.maximum(4 * np.pi * cfg.rho * r[None, :] * F * cb, 1e-9)
-        disc = (a_ * Vd)**2 - 4 * a_ * dT_be
-        vi_n = np.where(disc > 0, (a_ * Vd - np.sqrt(np.maximum(disc, 0.0))) / (2 * a_), 0.0)
-        vi   = 0.6 * vi + 0.4 * vi_n                      # under-relaxed fixed point
+        # blade-element axial load per unit span. Descent/windmill FBD: drag's
+        # axial component SUPPORTS weight, so thrust = L cosφ + D sinφ (see
+        # forces()); the +cd·sinφ sign matches the L sinφ − D cosφ torque.
+        dT_be = 0.5 * cfg.rho * U2 * c[None, :] * (cl*np.cos(phi) + cd*np.sin(phi)) * cfg.n_blades
+        # momentum per annulus: dT/dr = 4π ρ r (Vd − v_i) v_i F cosβ, a downward
+        # parabola in v_i peaking at v_i=Vd/2 (value a_·Vd²/4). Take the smaller
+        # (lightly-loaded) root; when the blade load exceeds the momentum peak
+        # (disc<0, turbulent-wake state) clamp v_i to the peak Vd/2 (Glauert/Buhl
+        # empirical) rather than 0; braking elements (dT_be≤0) take v_i=0. Keep
+        # v_i∈[0, Vd/2] so the inflow can never go negative or diverge.
+        a_    = np.maximum(4 * np.pi * cfg.rho * r[None, :] * F * cb, 1e-9)
+        disc  = (a_ * Vd)**2 - 4 * a_ * dT_be
+        vi_lo = (a_ * Vd - np.sqrt(np.maximum(disc, 0.0))) / (2 * a_)   # smaller root
+        vi_n  = np.where(dT_be <= 0.0, 0.0, np.where(disc >= 0.0, vi_lo, 0.5 * Vd))
+        vi_n  = np.clip(vi_n, 0.0, 0.5 * Vd)
+        vi    = 0.6 * vi + 0.4 * vi_n                      # under-relaxed fixed point
 
     Up  = (Vd - vi) * cb
     phi = np.arctan2(Up, Ut)
@@ -147,7 +160,9 @@ def forces(Vd, Om, cfg, grid):
     dr = r[1] - r[0]
     _, _, phi, al, U2, cl, cd, _ = _state(Vd, Om, cfg, r, c, theta)
     q  = 0.5 * cfg.rho * U2 * c[None, :]
-    dT = (q*cl*np.cos(phi) - q*cd*np.sin(phi)) * cfg.n_blades
+    # Descent/windmill FBD: T = L cosφ + D sinφ (drag's axial component supports
+    # weight); driving torque Q/r = L sinφ − D cosφ (lift drives, drag brakes).
+    dT = (q*cl*np.cos(phi) + q*cd*np.sin(phi)) * cfg.n_blades
     dQ = r[None, :] * (q*cl*np.sin(phi) - q*cd*np.cos(phi)) * cfg.n_blades
     T  = np.sum(dT * dr, axis=1)
     Q  = np.sum(dQ * dr, axis=1)
@@ -260,8 +275,9 @@ def validation_brackets(cfg, Vd, Om, m_kg):
     v_h = np.sqrt(DL / (2 * cfg.rho))             # induced-velocity scale [m/s]
     # ideal vertical-autorotation descent ≈ 1.8–2.1 · v_h (windmill-brake state)
     autorot_band = (1.8 * v_h, 2.1 * v_h)
-    # √(disk-loading) scaling from a real maple seed (DL≈0.26 N/m², V_d≈1.2 m/s)
-    scaled = 1.2 * np.sqrt(DL / 0.26)
+    # √(disk-loading) scaling anchored on the VALIDATED Sycamore A
+    # (DL_A≈0.363 N/m², V_d≈0.97 m/s) for internal consistency
+    scaled = 0.97 * np.sqrt(DL / 0.363)
     c_bar = float(np.mean(c))
     Ro    = cfg.R / c_bar                          # Rossby ~ R/c̄ (LEV stable if ≲3–4)
     Utip  = np.sqrt(Vd**2 + (Om * cfg.R)**2)
@@ -283,9 +299,14 @@ def validate_sycamore_A():
     grid = A.grid()
     _, _, _, al, _, _, _, _ = _state(Vd, Om, A, *grid)
     al = al[0]
-    ok = (not np.isnan(Vd)) and (0.4 < Vd < 1.4)        # paper natural descent ≈0.97
-    return {'Vd': Vd, 'rpm': Om * 60 / (2*np.pi) if not np.isnan(Om) else np.nan,
-            'alpha_root_deg': np.rad2deg(al[0]), 'alpha_tip_deg': np.rad2deg(al[-1]),
+    rpm = Om * 60 / (2*np.pi) if not np.isnan(Om) else np.nan
+    a_root, a_tip = np.rad2deg(al[0]), np.rad2deg(al[-1])
+    # Quantitative gate (not just "Vd in a wide window" — that passed wrong
+    # polars). Paper Sycamore A: Vd≈0.97 m/s; Ω≈1140–1150 rpm (Ω∝Vd); SNM root-α
+    # ~30–45° (NOT the ~70° uncorrected droptest data the paper rejects), tip ~5°.
+    ok = ((not np.isnan(Vd)) and (0.75 < Vd < 1.25)
+          and (850 < rpm < 1450) and (25 < a_root < 60) and (a_tip < 12))
+    return {'Vd': Vd, 'rpm': rpm, 'alpha_root_deg': a_root, 'alpha_tip_deg': a_tip,
             'pass': ok}
 
 
@@ -315,7 +336,7 @@ def report(cfg, m0=0.075):
     print(f"  ── reality brackets (Indicative) ──")
     print(f"    disk loading {b['disk_loading']:.2f} N/m²  → v_h={b['v_h']:.2f} m/s  "
           f"→ ideal autorot ≈ {b['autorot_band'][0]:.1f}–{b['autorot_band'][1]:.1f} m/s")
-    print(f"    √(DL)-scaled from real maple seed ≈ {b['scaled_from_seed']:.1f} m/s")
+    print(f"    √(DL)-scaled from validated Sycamore A ≈ {b['scaled_from_seed']:.1f} m/s")
     print(f"    Rossby R/c̄ = {b['rossby']:.1f} (LEV stable if ≲3–4)   "
           f"section Re {b['Re_span'][0]:.0f}–{b['Re_span'][1]:.0f}")
     return Vd0, Om0
@@ -327,7 +348,13 @@ SAMARA = Config(name='Sycamore device — samara-realistic (HEADLINE)',
                 theta_root_deg=-2.6, theta_tip_deg=-2.6,  # real Sycamore-A pitch
                 alpha_sign=+1.0, cl_alpha=5.3, cd0=0.025)
 
-LEGACY = Config(name='Sycamore device — legacy 35°/20° high-pitch (Wave-3 to revisit)',
+# NOTE: LEGACY is a DEPRECATED ARTIFACT, not a physics comparison. alpha_sign=−1
+# (α=θ−φ) is geometrically wrong for a pitched rigid blade in inflow (the real
+# AoA is θ+φ); it feeds the correct torque formula cl/cd at a non-physical,
+# flow-state-dependent angle, so its "equilibrium" solves an inconsistent model.
+# Run honestly at α=θ+φ the 35°/20° geometry would NOT autorotate (consistent
+# with the negative-pitch finding). Kept only to show the old number.
+LEGACY = Config(name='Sycamore device — LEGACY 35°/20° (DEPRECATED wrong-convention artifact)',
                 R=0.30, c_root=0.08, c_tip=0.03,
                 theta_root_deg=35.0, theta_tip_deg=20.0,
                 alpha_sign=-1.0, cl_alpha=5.3, cd0=0.025)
@@ -337,11 +364,13 @@ if __name__ == '__main__':
     # 1) credibility anchor
     v = validate_sycamore_A()
     print(f"\n[validation] Sycamore A: V_d={v['Vd']:.2f} m/s (paper ≈0.97), "
-          f"{v['rpm']:.0f} RPM, α root→tip {v['alpha_root_deg']:.0f}°→{v['alpha_tip_deg']:.0f}° "
-          f"(paper ~70°→5°)  → {'PASS ✓' if v['pass'] else 'FAIL ✗'}")
+          f"{v['rpm']:.0f} RPM (paper ~1145), α root→tip {v['alpha_root_deg']:.0f}°→{v['alpha_tip_deg']:.0f}° "
+          f"(paper SNM ~30–45°→~5°)  → {'PASS ✓' if v['pass'] else 'FAIL ✗'}")
 
     # 2) the two device configs, side by side
     Vd_s, Om_s = report(SAMARA)
+    print("\n  ⚠ LEGACY below is a DEPRECATED wrong-convention artifact (α=θ−φ is")
+    print("    non-physical for a pitched blade); NOT a valid physics comparison.")
     Vd_l, Om_l = report(LEGACY)
 
     # 3) figure: descent & RPM vs mass (both configs) + samara spanwise α / dQ/dr
