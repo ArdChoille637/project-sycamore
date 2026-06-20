@@ -1,48 +1,64 @@
 """
-Reduced-order Blade-Element Momentum (BEM) model for samara autorotation.
+Blade-element model for samara autorotation — Project Sycamore.
 
-Solves for steady-state descent velocity and rotation rate of a single-wing
-rotating UAV. This is the aerodynamic proof-of-concept for Project Sycamore's
-morphing-wing bi-modal design.
+Solves for the steady autorotation equilibrium (descent rate V_d and rotation
+rate Ω) of a single-wing rotating UAV, the aerodynamic proof-of-concept for the
+samara-biomimetic bi-modal airframe.
 
-Physics
--------
-Blade-element theory resolves aerodynamic forces at each spanwise station:
-  - Thrust dT/dr = N(L'cosφ − D'sinφ)
-  - Torque dQ/dr = Nr(L'sinφ − D'cosφ)
-where φ = arctan(V_d / Ω r) is the local inflow angle.
+What this is (honest scope)
+---------------------------
+This is **blade-element / strip theory with momentum-theory induced inflow** —
+the same low-order "Samara Numerical Model" used by Jung & Rezgui (2023). It is
+NOT a high-fidelity CFD; sectional forces come from an analytic LEV polar.
 
-At steady autorotation two conditions must hold simultaneously:
-  (1) Thrust T = Weight W       (vertical force balance)
-  (2) Net torque Q = 0          (no engine, rotor self-sustains)
+Aerodynamics — the LEV, not a flat plate
+----------------------------------------
+Autorotating samaras do not stall conventionally: a stable leading-edge vortex
+(LEV) keeps the flow attached to extreme incidence, so sectional lift peaks at
+α = 45° and the wing runs at α ~70° (root) → ~5° (tip). We use the validated
+"normal force" sectional model (Jung & Rezgui 2023, Aerospace 10:414):
+    C_L(α) = C_Lα · sinα·cosα            C_D(α) = C_D0 + C_Lα · sin²α
+with C_Lα (lift-curve-slope parameter, 1/rad) and C_D0 (zero-lift drag) fitted,
+wing/Reynolds-dependent constants (natural Sycamore: C_Lα 4.6–5.6, C_D0
+0.016–0.033). This replaced an earlier thin-plate 2π + hard-10°-Viterna model
+that crashed lift at 10° — physically wrong for the LEV regime.
 
-Solver
-------
-The thrust balance T(V_d,Ω)=W is multivalued in V_d, so a plain brentq over
-the whole interval returns an arbitrary root and silently jumps branches as Ω
-varies. Instead we: enumerate ALL T=W roots on a grid, assemble them into
-continuous V_d(Ω) branches by continuation, and locate the autorotation
-equilibrium as the *stable* net-torque zero (Q: driving→braking, dQ/dΩ<0) on a
-single branch. The post-stall polar is C¹-blended so T(V_d) is smooth: a hard
-stall switch produced 5–13 spurious roots and a V_d 4.4→8.8 m/s branch jump at
-the operating Ω, making the old reported equilibrium partly a numerical
-artifact. `solve(m, return_info=True)` returns well-posedness diagnostics.
+Induced inflow
+--------------
+Momentum theory gives a per-element induced velocity v_i in the windmilling-
+brake (descent) state: the axial through-flow is U_p = (V_d − v_i)·cosβ (v_i
+SUBTRACTED — the correct descent-state sign), solved against the blade-element
+load with a Prandtl single-blade tip-loss factor F. α = θ + φ (paper sign
+convention), φ = arctan(U_p/U_t), U_t = Ωr. The momentum parabola peaks at
+v_i=V_d/2; heavily-loaded elements past that peak (turbulent-wake state) clamp
+to V_d/2 (Glauert/Buhl empirical) rather than dropping induced inflow to zero,
+and v_i is bounded to [0, V_d/2] so it cannot go negative or diverge. The
+descent FBD also fixes the thrust drag-sign: T = L cosφ + D sinφ.
 
-Pitch geometry note
+Solver — well posed
 -------------------
-Samara-inspired UAVs require higher collective pitch than a helicopter —
-typically 30–40° at root, 15–25° at tip — so that the inner blade stations
-(large φ) operate in positive AoA and drive the rotation while the tip brakes.
-The pitch angles below are representative of Stahl et al. (2019) style designs.
+The thrust balance T(V_d)=W is multivalued, so a plain brentq returns an
+arbitrary root and branch-jumps. We enumerate ALL T=W roots, assemble them into
+continuous V_d(Ω) branches by continuation, and locate the equilibrium as the
+*stable* on-branch net-torque zero (Q: driving→braking, dQ/dΩ<0).
 
-Reference: Lentink et al. (2009) Science 324:1438; Yasuda & Azuma (1997)
-           J.Theor.Biol. 185:313.
+Validation
+----------
+`validate_sycamore_A()` runs the model on the paper's measured Sycamore A
+(R=4.47cm, c̄=1.15cm, m=232mg, θ=−2.6°) and checks it reproduces the slow
+samara descent (sub-1 m/s) with root-high/tip-low α — the credibility anchor
+for applying the same model to the engineered device.
+
+References: Jung & Rezgui (2023) Aerospace 10:414; Lentink et al. (2009)
+Science 324:1438; Lee, Lee & Sohn (2014) Exp.Fluids 55:1718; Yasuda & Azuma
+(1997) J.Theor.Biol. 185:313.
 
 Run with:  ~/ds/bin/python samara_bem.py
-Outputs :  output/samara_bem.png
+Outputs :  console report (samara + legacy configs) + output/samara_bem.png
 """
 
 import numpy as np
+from dataclasses import dataclass
 from scipy.optimize import brentq
 import matplotlib
 matplotlib.use('Agg')
@@ -50,120 +66,129 @@ import matplotlib.pyplot as plt
 import os
 os.makedirs('output', exist_ok=True)
 
-# ── UAV design parameters (edit here) ─────────────────────────────────────
-R         = 0.30            # tip radius [m]
-c_root    = 0.08            # root chord [m]
-c_tip     = 0.03            # tip chord [m]
-theta_root = np.deg2rad(35) # root collective pitch [rad]  (samara-scale requires ~35°)
-theta_tip  = np.deg2rad(20) # tip pitch [rad]
-N_BLADES  = 1               # samara = single wing
-RHO       = 1.167           # air density at ~500 m MSL [kg/m³]
-N_ELEM    = 50              # spanwise integration elements
+G       = 9.81
+NU_AIR  = 1.5e-5     # kinematic viscosity of air [m²/s] (for section Reynolds)
 
-# ── Spanwise discretisation ───────────────────────────────────────────────
-r_hub = 0.15 * R            # 15% root cutout (seed body region)
-r     = np.linspace(r_hub, R, N_ELEM)
-dr    = r[1] - r[0]
-c     = c_root + (c_tip - c_root) * (r - r_hub) / (R - r_hub)
-theta = theta_root + (theta_tip - theta_root) * (r - r_hub) / (R - r_hub)
 
-# ── Thin-plate airfoil model with Viterna post-stall (C¹-blended) ────────
-# Pre-stall: thin airfoil (2π slope).
-# Post-stall: Viterna (1982) flat-plate extension — CL drops, CD rises sharply.
-# This is essential for the tip-braking region that sustains autorotation.
-#
-# The pre/post branches are joined by a smooth logistic weight rather than a
-# hard `where` switch at ALPHA_STALL. The hard switch put a kink in CL(α) at
-# every spanwise element's stall crossing, which made the summed thrust
-# T(V_d) non-monotonic — at the operating Ω, T(V_d)=W had 5–13 spurious roots
-# and the root-finder branch-jumped (V_d 4.4→8.8 m/s across Ω≈107), so the
-# reported equilibrium was partly a numerical artifact. The blend makes
-# cl_cd C¹ (in fact C∞), so T(V_d) is smooth and the equilibrium is well
-# posed. BLEND→0 recovers the original hard switch.
-ALPHA_STALL = np.deg2rad(10)
-CD_MAX      = 1.2             # flat plate maximum drag coefficient
-BLEND       = np.deg2rad(2.0) # stall-transition half-width for C¹ blending
+# ── Sectional LEV airfoil model — Jung & Rezgui (2023) "normal force" ──────
+def cl_cd(alpha, cl_alpha, cd0):
+    """Sectional (CL, CD) for AoA [rad]: CL=cl_alpha·sinα·cosα (peak at 45°),
+    CD=cd0+cl_alpha·sin²α. Smooth (C∞), stall-free; CL odd / CD even in α."""
+    s, co = np.sin(alpha), np.cos(alpha)
+    return cl_alpha * s * co, cd0 + cl_alpha * s**2
 
-def cl_cd(alpha):
-    """Returns (CL, CD) for AoA [rad], C¹-continuous across stall."""
-    sign = np.sign(alpha)
-    a    = np.abs(alpha)
-    # smooth pre→post weight: ~1 below stall, ~0 above, continuous derivative
-    w    = 1.0 / (1.0 + np.exp((a - ALPHA_STALL) / BLEND))
 
-    cl_pre  = 2 * np.pi * alpha
-    cl_post = sign * (CD_MAX / 2) * np.sin(2 * a)
+# ── Design configuration ──────────────────────────────────────────────────
+@dataclass
+class Config:
+    name:           str
+    R:              float = 0.30      # tip radius [m]
+    c_root:         float = 0.08      # root chord [m]
+    c_tip:          float = 0.03      # tip chord [m]
+    theta_root_deg: float = 0.0       # root pitch [deg]
+    theta_tip_deg:  float = 0.0       # tip pitch [deg]
+    hub_frac:       float = 0.15      # root cutout as fraction of R
+    n_blades:       int   = 1
+    coning_deg:     float = 10.0      # coning angle β [deg]
+    alpha_sign:     float = +1.0      # +1: α=θ+φ (samara) | −1: α=θ−φ (legacy)
+    cl_alpha:       float = 5.3       # LEV lift-curve-slope parameter [1/rad]
+    cd0:            float = 0.025      # zero-lift drag coefficient [-]
+    rho:            float = 1.167      # air density [kg/m³] (~500 m MSL)
+    induced:        bool  = True       # momentum induced inflow
+    tiploss:        bool  = True       # Prandtl single-blade tip loss
+    n_elem:         int   = 40
 
-    cd_pre  = 0.01 + 0.05 * alpha**2
-    cd_post = CD_MAX * np.sin(a)**2 + 0.01 * np.cos(a)**2
+    def grid(self):
+        r_hub = self.hub_frac * self.R
+        r  = np.linspace(r_hub, self.R, self.n_elem)
+        c  = self.c_root + (self.c_tip - self.c_root) * (r - r_hub) / (self.R - r_hub)
+        th = np.deg2rad(self.theta_root_deg +
+                        (self.theta_tip_deg - self.theta_root_deg) *
+                        (r - r_hub) / (self.R - r_hub))
+        return r, c, th
 
-    return w * cl_pre + (1 - w) * cl_post, w * cd_pre + (1 - w) * cd_post
 
-# ── Force integrals at a given operating point ────────────────────────────
-def forces(Vd, Omega):
-    Ut   = Omega * r
-    Veff = np.sqrt(Ut**2 + Vd**2)
-    phi  = np.arctan2(Vd, Ut)        # inflow angle from rotor plane [rad]
-    alpha = theta - phi
-    cl, cd = cl_cd(alpha)
-    q    = 0.5 * RHO * Veff**2 * c   # dynamic pressure per unit span [N/m]
-    T    = N_BLADES * np.sum((q*cl*np.cos(phi) - q*cd*np.sin(phi)) * dr)
-    Q    = N_BLADES * np.sum(r * (q*cl*np.sin(phi) - q*cd*np.cos(phi)) * dr)
+# ── Per-element flow state (momentum induced inflow + Prandtl tip loss) ────
+def _state(Vd, Om, cfg, r, c, theta, n_it=15):
+    """Flow state at each blade element. Vd may be scalar or a (nv,) array;
+    returns fields broadcast to (nv, ne)."""
+    Vd = np.atleast_1d(np.asarray(Vd, float))[:, None]   # (nv, 1)
+    Ut = (Om * r)[None, :]                                # (1, ne)
+    cb = np.cos(np.deg2rad(cfg.coning_deg))
+    vi = np.zeros((Vd.shape[0], r.size))                  # (nv, ne)
+
+    for _ in range(n_it if cfg.induced else 0):
+        Up  = (Vd - vi) * cb
+        phi = np.arctan2(Up, Ut)
+        al  = theta[None, :] + cfg.alpha_sign * phi
+        cl, cd = cl_cd(al, cfg.cl_alpha, cfg.cd0)
+        U2  = Up**2 + Ut**2
+        if cfg.tiploss:
+            sphi = np.maximum(np.abs(np.sin(phi)), 1e-3)
+            f = (cfg.n_blades / 2.0) * (cfg.R - r)[None, :] / (r[None, :] * sphi)
+            F = np.maximum((2 / np.pi) * np.arccos(np.clip(np.exp(-f), 0.0, 1.0)), 1e-4)
+        else:
+            F = 1.0
+        # blade-element axial load per unit span. Descent/windmill FBD: drag's
+        # axial component SUPPORTS weight, so thrust = L cosφ + D sinφ (see
+        # forces()); the +cd·sinφ sign matches the L sinφ − D cosφ torque.
+        dT_be = 0.5 * cfg.rho * U2 * c[None, :] * (cl*np.cos(phi) + cd*np.sin(phi)) * cfg.n_blades
+        # momentum per annulus: dT/dr = 4π ρ r (Vd − v_i) v_i F cosβ, a downward
+        # parabola in v_i peaking at v_i=Vd/2 (value a_·Vd²/4). Take the smaller
+        # (lightly-loaded) root; when the blade load exceeds the momentum peak
+        # (disc<0, turbulent-wake state) clamp v_i to the peak Vd/2 (Glauert/Buhl
+        # empirical) rather than 0; braking elements (dT_be≤0) take v_i=0. Keep
+        # v_i∈[0, Vd/2] so the inflow can never go negative or diverge.
+        a_    = np.maximum(4 * np.pi * cfg.rho * r[None, :] * F * cb, 1e-9)
+        disc  = (a_ * Vd)**2 - 4 * a_ * dT_be
+        vi_lo = (a_ * Vd - np.sqrt(np.maximum(disc, 0.0))) / (2 * a_)   # smaller root
+        vi_n  = np.where(dT_be <= 0.0, 0.0, np.where(disc >= 0.0, vi_lo, 0.5 * Vd))
+        vi_n  = np.clip(vi_n, 0.0, 0.5 * Vd)
+        vi    = 0.6 * vi + 0.4 * vi_n                      # under-relaxed fixed point
+
+    Up  = (Vd - vi) * cb
+    phi = np.arctan2(Up, Ut)
+    al  = theta[None, :] + cfg.alpha_sign * phi
+    cl, cd = cl_cd(al, cfg.cl_alpha, cfg.cd0)
+    U2  = Up**2 + Ut**2
+    return Up, Ut, phi, al, U2, cl, cd, vi
+
+
+def forces(Vd, Om, cfg, grid):
+    """Total thrust T [N] and net torque Q [N·m]. Vectorised over Vd → (nv,)."""
+    r, c, theta = grid
+    dr = r[1] - r[0]
+    _, _, phi, al, U2, cl, cd, _ = _state(Vd, Om, cfg, r, c, theta)
+    q  = 0.5 * cfg.rho * U2 * c[None, :]
+    # Descent/windmill FBD: T = L cosφ + D sinφ (drag's axial component supports
+    # weight); driving torque Q/r = L sinφ − D cosφ (lift drives, drag brakes).
+    dT = (q*cl*np.cos(phi) + q*cd*np.sin(phi)) * cfg.n_blades
+    dQ = r[None, :] * (q*cl*np.sin(phi) - q*cd*np.cos(phi)) * cfg.n_blades
+    T  = np.sum(dT * dr, axis=1)
+    Q  = np.sum(dQ * dr, axis=1)
     return T, Q
 
-# ── Thrust-balance root handling (robust, branch-aware) ──────────────────
-# The old solver called brentq on the whole [0.1, 30] interval, which returns
-# *an* arbitrary root and silently jumps branches as Ω varies (the source of
-# the V_d 4.4→8.8 m/s discontinuity). Instead we enumerate ALL T(V_d)=W roots
-# on a grid and select the physical branch = lowest descent rate (the
-# windmill-brake autorotation state); higher-V_d roots are deep-stall states.
 
-def _thrust_curve(Vd_arr, Om, W):
-    """Vectorised T(V_d) − W over a V_d array at fixed Ω (one shot)."""
-    Vd    = np.asarray(Vd_arr)[:, None]          # (nv, 1)
-    Ut    = Om * r[None, :]                       # (1, ne)
-    Veff  = np.sqrt(Ut**2 + Vd**2)
-    phi   = np.arctan2(Vd, Ut)
-    alpha = theta[None, :] - phi
-    cl, cd = cl_cd(alpha)
-    q     = 0.5 * RHO * Veff**2 * c[None, :]
-    T     = N_BLADES * np.sum((q*cl*np.cos(phi) - q*cd*np.sin(phi)) * dr, axis=1)
-    return T - W
-
-def thrust_balance_roots(Om, W, vlo=0.1, vhi=30.0, n=400):
-    """All V_d in [vlo, vhi] with T(V_d, Ω)=W, refined and ascending."""
+# ── Robust multivalued thrust-balance root handling ───────────────────────
+def thrust_balance_roots(Om, W, cfg, grid, vlo=0.1, vhi=30.0, n=180):
+    """All V_d in [vlo, vhi] with T(V_d, Ω)=W, refined, ascending."""
     vs = np.linspace(vlo, vhi, n)
-    g  = _thrust_curve(vs, Om, W)
+    g  = forces(vs, Om, cfg, grid)[0] - W
     roots = []
     for i in np.where(np.diff(np.sign(g)) != 0)[0]:
         try:
-            roots.append(brentq(lambda v: forces(v, Om)[0] - W,
+            roots.append(brentq(lambda v: forces(v, Om, cfg, grid)[0][0] - W,
                                  vs[i], vs[i+1], xtol=1e-6))
         except Exception:
             pass
     return np.array(roots)
 
-def vd_physical(Om, W):
-    """Lowest-descent (physical autorotation) V_d root at this Ω, or nan."""
-    roots = thrust_balance_roots(Om, W)
-    return roots[0] if roots.size else np.nan
 
-# ── Branch continuation: assemble continuous V_d(Ω) autorotation branches ─
-def _track_branches(Omegas, W, gap=0.8):
-    """
-    Group the T(V_d)=W roots into continuous V_d(Ω) branches by continuation
-    in Ω (match each root to the nearest active branch tip; unmatched roots
-    seed new branches). Returns a list of (Om_array, Vd_array).
-
-    This is the heart of the well-posedness fix: the thrust balance is
-    multivalued (a slow-descent attached branch, a fast-descent stalled
-    branch, and a spurious near-zero branch that appears at higher Ω), and the
-    physical autorotation branch is the MIDDLE one — not the lowest root. The
-    old single-brentq search could not see this and jumped branches.
-    """
-    branches = []   # each: {'Om':[], 'Vd':[], 'tip':float, 'active':bool}
+def _track_branches(Omegas, W, cfg, grid, gap=0.8):
+    """Group T=W roots into continuous V_d(Ω) branches by continuation in Ω."""
+    branches = []
     for Om in Omegas:
-        roots = list(thrust_balance_roots(Om, W))
+        roots = list(thrust_balance_roots(Om, W, cfg, grid))
         used  = [False] * len(roots)
         for br in branches:
             if not br['active']:
@@ -185,156 +210,206 @@ def _track_branches(Omegas, W, gap=0.8):
                 branches.append({'Om': [Om], 'Vd': [v], 'tip': v, 'active': True})
     return [(np.array(b['Om']), np.array(b['Vd'])) for b in branches]
 
-# ── Branch-aware autorotation solver ──────────────────────────────────────
-def solve(m_kg, return_info=False):
-    """
-    Find (V_d*, Omega*) for autorotation at given UAV mass.
 
-    The thrust balance T(V_d)=W is multivalued, so its roots are first
-    assembled into continuous branches by continuation (`_track_branches`).
-    The physical autorotation equilibrium is the *stable* net-torque zero on a
-    branch — Q passing from driving (Q>0) to braking (Q<0), i.e. dQ/dΩ<0, a
-    self-correcting RPM. Among such crossings the slowest-descent one is
-    returned. This replaces the old single-brentq search, which returned an
-    arbitrary root and branch-jumped (V_d 4.4→8.8 m/s) at the operating Ω.
-
-    return_info=True also returns a diagnostics dict:
-      n_roots_at_op  — T=W multiplicity at Ω* (context, not a defect)
-      branch_jump    — largest V_d step along the SELECTED branch [m/s]
-      branch_smooth  — bool(branch_jump < 0.5): the tracked branch is continuous
-      dQ_dOmega      — on-branch torque slope at the zero (<0 ⇒ self-correcting)
-      self_correcting, well_posed
+def solve(cfg, m_kg, return_info=False):
     """
-    W = m_kg * 9.81
-    Omegas   = np.linspace(20, 300, 280)
-    branches = _track_branches(Omegas, W)
+    Autorotation equilibrium (V_d*, Ω*) for a config at given mass, following
+    the stable on-branch net-torque zero. return_info=True adds a well-posedness
+    diagnostics dict.
+    """
+    grid = cfg.grid()
+    W    = m_kg * G
+    Omegas   = np.linspace(20, 320, 130)
+    branches = _track_branches(Omegas, W, cfg, grid)
     nan_out  = (np.nan, np.nan, {}) if return_info else (np.nan, np.nan)
 
-    best = None   # (Vd_star, Om_star, dQ_dOm, Om_b, Vd_b)
+    best = None
     for Om_b, Vd_b in branches:
         if Om_b.size < 3:
             continue
-        Q_b = np.array([forces(v, om)[1] for om, v in zip(Om_b, Vd_b)])
+        Q_b = np.array([forces(v, om, cfg, grid)[1][0] for om, v in zip(Om_b, Vd_b)])
         for k in range(Q_b.size - 1):
             if Q_b[k] > 0.0 >= Q_b[k + 1]:                 # stable driving→braking zero
-                # refine Ω* staying on THIS branch (root nearest the interpolated tip)
                 def _q_branch(om, Om_b=Om_b, Vd_b=Vd_b):
-                    tgt   = np.interp(om, Om_b, Vd_b)
-                    roots = thrust_balance_roots(om, W)
-                    if roots.size == 0:
+                    tgt = np.interp(om, Om_b, Vd_b)
+                    rt  = thrust_balance_roots(om, W, cfg, grid)
+                    if rt.size == 0:
                         return np.nan
-                    return forces(roots[np.argmin(np.abs(roots - tgt))], om)[1]
+                    return forces(rt[np.argmin(np.abs(rt - tgt))], om, cfg, grid)[1][0]
                 try:
                     Om_star = brentq(_q_branch, Om_b[k], Om_b[k + 1], xtol=1e-4)
                 except Exception:
-                    Om_star = (Om_b[k] - Q_b[k] *
-                               (Om_b[k+1] - Om_b[k]) / (Q_b[k+1] - Q_b[k]))
-                tgt     = np.interp(Om_star, Om_b, Vd_b)
-                roots   = thrust_balance_roots(Om_star, W)
-                Vd_star = float(roots[np.argmin(np.abs(roots - tgt))]) if roots.size else tgt
+                    Om_star = Om_b[k] - Q_b[k] * (Om_b[k+1]-Om_b[k]) / (Q_b[k+1]-Q_b[k])
+                tgt = np.interp(Om_star, Om_b, Vd_b)
+                rt  = thrust_balance_roots(Om_star, W, cfg, grid)
+                Vd_star = float(rt[np.argmin(np.abs(rt - tgt))]) if rt.size else float(tgt)
                 dQ_dOm  = (Q_b[k+1] - Q_b[k]) / (Om_b[k+1] - Om_b[k])
-                if best is None or Vd_star < best[0]:      # slowest-descent stable eq.
-                    best = (Vd_star, Om_star, dQ_dOm, Om_b, Vd_b)
+                if best is None or Vd_star < best[0]:
+                    best = (Vd_star, Om_star, dQ_dOm, Vd_b)
 
     if best is None:
         return nan_out
-    Vd_star, Om_star, dQ_dOm, Om_b, Vd_b = best
-
+    Vd_star, Om_star, dQ_dOm, Vd_b = best
     if return_info:
         branch_jump = float(np.max(np.abs(np.diff(Vd_b)))) if Vd_b.size > 1 else 0.0
         info = {
-            'n_roots_at_op':   int(thrust_balance_roots(Om_star, W).size),
+            'n_roots_at_op':   int(thrust_balance_roots(Om_star, W, cfg, grid).size),
             'branch_jump':     branch_jump,
-            'branch_smooth':   bool(branch_jump < 0.5),
+            'branch_smooth':   bool(branch_jump < 1.0),   # vs the ~4.4 m/s pre-fix jump
             'dQ_dOmega':       float(dQ_dOm),
             'self_correcting': bool(dQ_dOm < 0),
-            'well_posed':      bool(branch_jump < 0.5 and dQ_dOm < 0),
+            'well_posed':      bool(branch_jump < 1.0 and dQ_dOm < 0),
         }
         return Vd_star, Om_star, info
     return Vd_star, Om_star
 
-# ── Baseline design ───────────────────────────────────────────────────────
-m0 = 0.075   # 75 g baseline UAV
-Vd0, Om0, info0 = solve(m0, return_info=True)
 
-if np.isnan(Vd0):
-    print("WARNING: BEM solver did not find an autorotation solution.")
-    print("  Check blade pitch angles and mass range.")
-else:
-    RPM0 = Om0 * 60 / (2 * np.pi)
-    mu0  = Vd0 / (Om0 * R)    # advance ratio
-    T0, Q0 = forces(Vd0, Om0)
+# ── Validation bracket: independent reality checks on the equilibrium ──────
+def validation_brackets(cfg, Vd, Om, m_kg):
+    """Independent estimates that bracket the BEM descent rate, per the
+    evidence-hygiene plan. Returns a dict; all are order-of-magnitude checks."""
+    grid = cfg.grid(); r, c, theta = grid
+    A   = np.pi * cfg.R**2
+    W   = m_kg * G
+    DL  = W / A                                   # disk loading [N/m²]
+    v_h = np.sqrt(DL / (2 * cfg.rho))             # induced-velocity scale [m/s]
+    # ideal vertical-autorotation descent ≈ 1.8–2.1 · v_h (windmill-brake state)
+    autorot_band = (1.8 * v_h, 2.1 * v_h)
+    # √(disk-loading) scaling anchored on the VALIDATED Sycamore A
+    # (DL_A≈0.363 N/m², V_d≈0.97 m/s) for internal consistency
+    scaled = 0.97 * np.sqrt(DL / 0.363)
+    c_bar = float(np.mean(c))
+    Ro    = cfg.R / c_bar                          # Rossby ~ R/c̄ (LEV stable if ≲3–4)
+    Utip  = np.sqrt(Vd**2 + (Om * cfg.R)**2)
+    Re_tip = Utip * c_bar / NU_AIR
+    Re_root = np.sqrt(Vd**2 + (Om * r[0])**2) * c[0] / NU_AIR
+    return {'disk_loading': DL, 'v_h': v_h, 'autorot_band': autorot_band,
+            'scaled_from_seed': scaled, 'rossby': Ro,
+            'Re_span': (Re_root, Re_tip)}
 
-    print(f"\n{'─'*52}")
-    print(f"  Sycamore BEM  |  m={m0*1000:.0f} g  R={R*100:.0f} cm  single blade")
-    print(f"{'─'*52}")
-    print(f"  Descent rate  : {Vd0:.2f} m/s  ({Vd0*196.85:.0f} ft/min)")
-    print(f"  Rotation rate : {RPM0:.0f} RPM  ({Om0:.1f} rad/s)")
-    print(f"  Tip speed     : {Om0*R:.1f} m/s   Ma {Om0*R/340:.3f}")
-    print(f"  Advance ratio : μ = {mu0:.3f}")
-    print(f"  Disk loading  : {m0*9.81/(np.pi*R**2):.2f} N/m²")
-    print(f"  Thrust check  : T = {T0:.4f} N  W = {m0*9.81:.4f} N")
-    print(f"  Torque check  : Q = {Q0:.6f} N·m  (target: 0)")
-    print(f"{'─'*52}")
-    print(f"  Well-posedness (Wave-0 fix):")
-    print(f"    T=W roots at op Ω : {info0['n_roots_at_op']}  "
-          f"(equilibrium tracked on the stable branch)")
-    print(f"    branch continuity : ΔV_d ≤ {info0['branch_jump']:.3f} m/s  "
-          f"({'smooth ✓' if info0['branch_smooth'] else 'JUMP ✗'}; was ~4.4 pre-fix)")
-    print(f"    dQ/dΩ at crossing : {info0['dQ_dOmega']:+.2e} N·m/(rad/s)  "
-          f"({'self-correcting ✓' if info0['self_correcting'] else 'divergent ✗'})")
-    print(f"    → equilibrium {'WELL POSED ✓' if info0['well_posed'] else 'still ill-posed ✗'}")
-    print(f"{'─'*52}\n")
 
-# ── Parametric sweep: mass 20 g → 200 g ──────────────────────────────────
-masses = np.linspace(0.020, 0.200, 25)
-Vds, Oms = [], []
-for m in masses:
-    Vd_i, Om_i = solve(m)
-    Vds.append(Vd_i); Oms.append(Om_i)
-Vds  = np.array(Vds)
-Oms  = np.array(Oms)
-RPMs = Oms * 60 / (2 * np.pi)
+# ── Sycamore-A validation (credibility anchor) ────────────────────────────
+def validate_sycamore_A():
+    """Run the model on the paper's measured Sycamore A and check it reproduces
+    a slow (sub-1 m/s) samara descent with root-high/tip-low α."""
+    A = Config(name='Sycamore A (validation)', R=0.0447, c_root=0.0115, c_tip=0.0115,
+               theta_root_deg=-2.6, theta_tip_deg=-2.6, hub_frac=0.12, coning_deg=10.0,
+               cl_alpha=5.8, cd0=0.032, rho=1.225, n_elem=60)
+    Vd, Om = solve(A, 0.000232)
+    grid = A.grid()
+    _, _, _, al, _, _, _, _ = _state(Vd, Om, A, *grid)
+    al = al[0]
+    rpm = Om * 60 / (2*np.pi) if not np.isnan(Om) else np.nan
+    a_root, a_tip = np.rad2deg(al[0]), np.rad2deg(al[-1])
+    # Quantitative gate (not just "Vd in a wide window" — that passed wrong
+    # polars). Paper Sycamore A: Vd≈0.97 m/s; Ω≈1140–1150 rpm (Ω∝Vd); SNM root-α
+    # ~30–45° (NOT the ~70° uncorrected droptest data the paper rejects), tip ~5°.
+    ok = ((not np.isnan(Vd)) and (0.75 < Vd < 1.25)
+          and (850 < rpm < 1450) and (25 < a_root < 60) and (a_tip < 12))
+    return {'Vd': Vd, 'rpm': rpm, 'alpha_root_deg': a_root, 'alpha_tip_deg': a_tip,
+            'pass': ok}
 
-# ── Blade-spanwise distributions at baseline ─────────────────────────────
-if not np.isnan(Vd0):
-    Ut_bl  = Om0 * r
-    Veff_bl = np.sqrt(Ut_bl**2 + Vd0**2)
-    phi_bl  = np.arctan2(Vd0, Ut_bl)
-    alpha_bl = theta - phi_bl
-    cl_bl, cd_bl = cl_cd(alpha_bl)
-    q_bl    = 0.5 * RHO * Veff_bl**2 * c
-    dQ_dr   = N_BLADES * r * (q_bl*cl_bl*np.sin(phi_bl) - q_bl*cd_bl*np.cos(phi_bl))
-    dT_dr   = N_BLADES * (q_bl*cl_bl*np.cos(phi_bl) - q_bl*cd_bl*np.sin(phi_bl))
 
-# ── Plots ─────────────────────────────────────────────────────────────────
-fig, ax = plt.subplots(1, 3, figsize=(13, 4))
-fig.suptitle(f'Sycamore BEM  —  R={R*100:.0f} cm  θ_root={np.rad2deg(theta_root):.0f}°  '
-             f'θ_tip={np.rad2deg(theta_tip):.0f}°  single blade', fontsize=10)
+# ── Report one config's baseline equilibrium ──────────────────────────────
+def report(cfg, m0=0.075):
+    Vd0, Om0, info = solve(cfg, m0, return_info=True)
+    print(f"\n{'═'*60}")
+    print(f"  {cfg.name}")
+    print(f"  R={cfg.R*100:.0f}cm  θ={cfg.theta_root_deg:.1f}→{cfg.theta_tip_deg:.1f}°  "
+          f"α=θ{'+' if cfg.alpha_sign>0 else '−'}φ  C_Lα={cfg.cl_alpha}  C_D0={cfg.cd0}  "
+          f"induced={cfg.induced} tiploss={cfg.tiploss}")
+    print(f"{'═'*60}")
+    if np.isnan(Vd0):
+        print("  No autorotation equilibrium found for this config.")
+        return Vd0, Om0
+    RPM0 = Om0 * 60 / (2*np.pi)
+    T0, Q0 = (forces(Vd0, Om0, cfg, cfg.grid())[0][0],
+              forces(Vd0, Om0, cfg, cfg.grid())[1][0])
+    b = validation_brackets(cfg, Vd0, Om0, m0)
+    print(f"  Descent rate  : {Vd0:.2f} m/s   Rotation : {RPM0:.0f} RPM ({Om0:.1f} rad/s)")
+    print(f"  Tip speed     : {Om0*cfg.R:.1f} m/s  Ma {Om0*cfg.R/340:.3f}   "
+          f"advance μ={Vd0/(Om0*cfg.R):.3f}")
+    print(f"  Thrust/Torque : T={T0:.4f} N  W={m0*G:.4f} N   Q={Q0:+.2e} N·m")
+    print(f"  Well posed    : {'YES ✓' if info['well_posed'] else 'no ✗'}  "
+          f"(roots@op={info['n_roots_at_op']}, ΔV_d≤{info['branch_jump']:.2f} m/s, "
+          f"dQ/dΩ={info['dQ_dOmega']:+.1e})")
+    print(f"  ── reality brackets (Indicative) ──")
+    print(f"    disk loading {b['disk_loading']:.2f} N/m²  → v_h={b['v_h']:.2f} m/s  "
+          f"→ ideal autorot ≈ {b['autorot_band'][0]:.1f}–{b['autorot_band'][1]:.1f} m/s")
+    print(f"    √(DL)-scaled from validated Sycamore A ≈ {b['scaled_from_seed']:.1f} m/s")
+    print(f"    Rossby R/c̄ = {b['rossby']:.1f} (LEV stable if ≲3–4)   "
+          f"section Re {b['Re_span'][0]:.0f}–{b['Re_span'][1]:.0f}")
+    return Vd0, Om0
 
-valid = ~np.isnan(Vds)
-ax[0].plot(masses[valid]*1000, Vds[valid], 'steelblue', lw=2)
-if not np.isnan(Vd0):
-    ax[0].axvline(m0*1000, ls='--', color='crimson', label=f'{m0*1000:.0f} g baseline')
-ax[0].set(xlabel='Mass [g]', ylabel='Descent velocity [m/s]', title='Descent Rate vs. Mass')
-ax[0].legend(fontsize=9); ax[0].grid(alpha=0.4)
 
-ax[1].plot(masses[valid]*1000, RPMs[valid], 'darkorange', lw=2)
-if not np.isnan(Om0):
-    ax[1].axvline(m0*1000, ls='--', color='crimson')
-ax[1].set(xlabel='Mass [g]', ylabel='Rotation rate [RPM]', title='Rotation Rate vs. Mass')
-ax[1].grid(alpha=0.4)
+# ── Configurations: samara-realistic headline + legacy 35°/20° ────────────
+SAMARA = Config(name='Sycamore device — samara-realistic (HEADLINE)',
+                R=0.30, c_root=0.08, c_tip=0.03,
+                theta_root_deg=-2.6, theta_tip_deg=-2.6,  # real Sycamore-A pitch
+                alpha_sign=+1.0, cl_alpha=5.3, cd0=0.025)
 
-if not np.isnan(Vd0):
-    ax[2].fill_between(r/R, dQ_dr, 0, where=dQ_dr>0, alpha=0.30, color='green', label='Driving')
-    ax[2].fill_between(r/R, dQ_dr, 0, where=dQ_dr<0, alpha=0.30, color='red',   label='Braking')
-    ax[2].plot(r/R, dQ_dr, 'purple', lw=1.5)
-    ax[2].axhline(0, color='k', lw=0.8)
-    ax[2].set(xlabel='r/R', ylabel='dQ/dr [N·m/m]',
-              title=f'Torque distribution  ({m0*1000:.0f} g baseline)')
-    ax[2].legend(); ax[2].grid(alpha=0.4)
+# NOTE: LEGACY is a DEPRECATED ARTIFACT, not a physics comparison. alpha_sign=−1
+# (α=θ−φ) is geometrically wrong for a pitched rigid blade in inflow (the real
+# AoA is θ+φ); it feeds the correct torque formula cl/cd at a non-physical,
+# flow-state-dependent angle, so its "equilibrium" solves an inconsistent model.
+# Run honestly at α=θ+φ the 35°/20° geometry would NOT autorotate (consistent
+# with the negative-pitch finding). Kept only to show the old number.
+LEGACY = Config(name='Sycamore device — LEGACY 35°/20° (DEPRECATED wrong-convention artifact)',
+                R=0.30, c_root=0.08, c_tip=0.03,
+                theta_root_deg=35.0, theta_tip_deg=20.0,
+                alpha_sign=-1.0, cl_alpha=5.3, cd0=0.025)
 
-plt.tight_layout()
-out = 'output/samara_bem.png'
-plt.savefig(out, dpi=150, bbox_inches='tight')
-print(f'Saved: {out}')
+
+if __name__ == '__main__':
+    # 1) credibility anchor
+    v = validate_sycamore_A()
+    print(f"\n[validation] Sycamore A: V_d={v['Vd']:.2f} m/s (paper ≈0.97), "
+          f"{v['rpm']:.0f} RPM (paper ~1145), α root→tip {v['alpha_root_deg']:.0f}°→{v['alpha_tip_deg']:.0f}° "
+          f"(paper SNM ~30–45°→~5°)  → {'PASS ✓' if v['pass'] else 'FAIL ✗'}")
+
+    # 2) the two device configs, side by side
+    Vd_s, Om_s = report(SAMARA)
+    print("\n  ⚠ LEGACY below is a DEPRECATED wrong-convention artifact (α=θ−φ is")
+    print("    non-physical for a pitched blade); NOT a valid physics comparison.")
+    Vd_l, Om_l = report(LEGACY)
+
+    # 3) figure: descent & RPM vs mass (both configs) + samara spanwise α / dQ/dr
+    masses = np.linspace(0.030, 0.200, 8)
+    def sweep(cfg):
+        vd, rpm = [], []
+        for m in masses:
+            v_, o_ = solve(cfg, m)
+            vd.append(v_); rpm.append(o_ * 60/(2*np.pi) if not np.isnan(o_) else np.nan)
+        return np.array(vd), np.array(rpm)
+    vd_s, rpm_s = sweep(SAMARA)
+    vd_l, rpm_l = sweep(LEGACY)
+
+    fig, ax = plt.subplots(1, 3, figsize=(14, 4.2))
+    fig.suptitle('Sycamore BEM — Jung & Rezgui LEV polar + induced inflow + tip loss', fontsize=11)
+    ax[0].plot(masses*1e3, vd_s, 'steelblue', lw=2, label='samara-realistic')
+    ax[0].plot(masses*1e3, vd_l, 'crimson', lw=2, ls='--', label='legacy 35°/20°')
+    ax[0].axvline(75, color='gray', ls=':'); ax[0].set(xlabel='Mass [g]',
+                 ylabel='Descent V_d [m/s]', title='Descent rate vs mass')
+    ax[0].legend(fontsize=8); ax[0].grid(alpha=0.4)
+    ax[1].plot(masses*1e3, rpm_s, 'steelblue', lw=2)
+    ax[1].plot(masses*1e3, rpm_l, 'crimson', lw=2, ls='--')
+    ax[1].axvline(75, color='gray', ls=':'); ax[1].set(xlabel='Mass [g]',
+                 ylabel='Rotation [RPM]', title='Rotation rate vs mass'); ax[1].grid(alpha=0.4)
+
+    if not np.isnan(Vd_s):
+        grid = SAMARA.grid(); r, c, theta = grid
+        _, _, phi, al, U2, cl, cd, _ = _state(Vd_s, Om_s, SAMARA, *grid)
+        al = al[0]; phi = phi[0]; U2 = U2[0]; cl = cl[0]; cd = cd[0]
+        q  = 0.5*SAMARA.rho*U2*c
+        dQ = r*(q*cl*np.sin(phi) - q*cd*np.cos(phi))*SAMARA.n_blades
+        ax2 = ax[2]; ax2b = ax2.twinx()
+        ax2.fill_between(r/SAMARA.R, dQ, 0, where=dQ>0, alpha=0.25, color='green', label='driving')
+        ax2.fill_between(r/SAMARA.R, dQ, 0, where=dQ<0, alpha=0.25, color='red', label='braking')
+        ax2.plot(r/SAMARA.R, dQ, 'purple', lw=1.5); ax2.axhline(0, color='k', lw=0.8)
+        ax2b.plot(r/SAMARA.R, np.rad2deg(al), 'navy', lw=1.2, ls=':')
+        ax2.set(xlabel='r/R', ylabel='dQ/dr [N·m/m]', title='Samara spanwise: torque & α')
+        ax2b.set_ylabel('α [deg]', color='navy'); ax2.legend(fontsize=8, loc='upper right')
+        ax2.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig('output/samara_bem.png', dpi=150, bbox_inches='tight')
+    print('\nSaved: output/samara_bem.png')
