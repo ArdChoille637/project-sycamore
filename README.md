@@ -21,6 +21,11 @@ with a NumPy fallback everywhere.
 | Module | What it does |
 |---|---|
 | `01_aero/samara_bem.py` | Blade-element-momentum autorotation solver for the samara airframe (descent rate, RPM, pitch schedule for autorotation equilibrium). |
+| `01_aero/samara_mass.py` | CG-referenced mass/inertia model — `I_spin`, transverse moments, pendulum stability, and the nose-prop weight bound. |
+| `01_aero/samara_transient.py` | 2-DOF active→passive transition dynamics: stable-attractor eigenvalues + basin of attraction. |
+| `01_aero/samara_optimize.py` | Wing-geometry optimisation for stable autorotation over the Rossby (aspect-ratio) band. **Flags the headline `SAMARA` geometry (Ro≈5.45) as outside its stable-LEV feasibility window `[3,4]`** — see the caveat below. |
+| `01_aero/samara_1rev.py` | Single-wing 1/rev dynamics — spin blur, CG-offset vibration, gyroscopic coning, and the decoupled-core isolation spec. |
+| `01_aero/samara_prop.py` | Powered-mode actuator-disk propeller aero — hover/climb power, the disk-loading↔weight trade, and the transition initial condition. |
 | `05_cfd/lbm_mlx.py` | **D2Q9 Lattice-Boltzmann** CFD core (MLX/Metal GPU, NumPy fallback) — a native high-fidelity aero path that resolves the leading-edge vortex the BEM model can't. Streaming = array roll, collision = element-wise: the workload Apple Silicon accelerates well. |
 | `05_cfd/lbm_validate.py` | Lid-driven cavity validation vs **Ghia et al. (1982)** — centreline RMSE ≈ 0.006 of lid speed. |
 | `05_cfd/lbm_cylinder.py` | Flow past a cylinder — Kármán vortex street + momentum-exchange forces (qualitative; St/Cd elevated by channel confinement). |
@@ -46,6 +51,18 @@ with a NumPy fallback everywhere.
 | `03_swarm/fire_swarm.py` | **Coupled fire ↔ swarm** — the swarm patrols the *live* Rothermel fire front as it grows and advances. |
 | `03_swarm/validate_mlx.py` | MLX-vs-NumPy equivalence + benchmark + steady-state statistics. |
 | `sycamore_teach.py` | Manim educational animation of the architecture, BEM, and boids. |
+
+> **Headline-geometry caveat (honest disclosure).** The downstream aero/dynamics modules
+> (`samara_1rev`, `samara_prop`, `samara_transient`, `samara_mass`) and all headline numbers
+> (descent ≈ 2.9 m/s, 650 RPM, the 1/rev and prop specs) are computed on the `SAMARA` baseline
+> geometry, which sits at **Rossby ≈ 5.45** — *outside* the stable-LEV / valid-strip-theory band
+> `[3,4]` that `samara_optimize.py` argues for. The optimiser's own feasible optimum is a
+> wider-chord geometry (Ro ≈ 3.03) that it does **not** wire back into the build. This
+> baseline-vs-optimum tension is **deliberately left unresolved pending a resolved-Re CFD /
+> wind-tunnel spot-check**: the optimum is itself locally non-slender (root chord ≈ half the hub
+> radius) and its descent advantage is a soft-Ro-threshold result, so neither geometry is yet the
+> validated answer. Treat the headline geometry as the engineering baseline and the optimum as a
+> directional "wider chord helps, pending CFD" finding.
 
 ## Apple Silicon / MLX
 

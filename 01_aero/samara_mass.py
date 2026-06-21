@@ -44,7 +44,7 @@ import numpy as np
 from dataclasses import dataclass
 import samara_bem as sb
 
-G = 9.81
+G = sb.G          # single source of truth (samara_bem)
 
 
 @dataclass
@@ -137,7 +137,7 @@ def validate_inertia():
     # 2) parallel-axis: point mass m at x=d plus equal mass at x=0 → CG at d/2,
     #    polar about CG = 2·m·(d/2)² = m·d²/2.  Build directly via the cloud math.
     d, m = 0.4, 0.5
-    xs = np.array([d, 0.0]); zs = np.array([0.0, 0.0]); ms = np.array([m, m]); Mt = ms.sum()
+    xs = np.array([d, 0.0]); ms = np.array([m, m]); Mt = ms.sum()
     rcg = (ms*xs).sum()/Mt; Ispin = (ms*(xs-rcg)**2).sum()
     ok_par = abs(Ispin - m*d**2/2) < 1e-9 and abs(rcg - d/2) < 1e-12
     # 3) axial-spread identity: I_yy = I_spin + Σm·z'²  ≥  I_spin (always)

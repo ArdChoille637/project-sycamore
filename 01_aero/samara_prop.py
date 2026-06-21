@@ -31,7 +31,7 @@ Run:  ~/ds/bin/python samara_prop.py
 import numpy as np
 import samara_bem as sb
 
-G   = 9.81
+G   = sb.G                   # single source of truth (samara_bem)
 RHO = sb.SAMARA.rho          # 1.167 kg/m³ (match the aero model)
 
 # --- prop+motor mass model (Indicative; assumptions are printed in the report) ---
@@ -100,9 +100,9 @@ def report(m_kg=0.075, D_p=0.10, FM=0.65, f_prop_max=0.28):
     print(f"     +1 m/s climb: v_i={c['v_i']:.2f} m/s, real power = {c['P_real']:.1f} W "
           f"(+{100*(c['P_real']/h['P_real']-1):.0f}%)")
 
-    print(f"\n  P3 — transition IC: the natural active→passive hand-off is engine cut")
-    print(f"     from hover (V_z=0, prop thrust→0) ⇒ the transient solver's IC is")
-    print(f"     V_z0≈0, Ω0≈0 (free-fall spin-up), which it currently just assumes.")
+    print(f"\n  P3 — transition IC: the natural active→passive hand-off is engine cut from")
+    print(f"     hover (V_z=0, prop thrust→0) while already at autorotation spin ⇒ the transient")
+    print(f"     solver's nominal IC is V_z0≈0, Ω0=Ω* (≈650 RPM) — matching samara_transient.")
 
     print(f"\n  P4 — disk-loading vs weight trade (mass model: {PROP_G_AT_10CM:.0f} g blade @10 cm ∝D²,")
     print(f"     motor {MOTOR_W_PER_G:.0f} W/g, {MOTOR_FLOOR_G:.0f} g floor; budget f_prop≤{f_prop_max:.2f} ⇒ ≤{m_budget_g:.0f} g):")

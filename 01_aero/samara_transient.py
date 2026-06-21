@@ -44,7 +44,7 @@ import os
 import samara_bem as sb
 import samara_mass as sm
 
-G = 9.81
+G = sb.G          # single source of truth (samara_bem)
 os.makedirs('output', exist_ok=True)
 
 
@@ -88,7 +88,7 @@ def transition(cfg, mass, Vz0, Om0, eq=None, t_max=40.0, settle_tol=0.02, metric
     in_settle = t <= t_settle
     alt_to_settle = float(np.trapezoid(np.maximum(Vz[in_settle], 0), t[in_settle])) if t_settle > 0 else 0.0
     # peak spanwise AoA and root-bending load during the transient
-    r, c, theta = grid; dr = r[1]-r[0]; peak_aoa = 0.0; peak_load = 0.0
+    r, c, theta = grid; peak_aoa = 0.0; peak_load = 0.0
     Vd_load = abs(_root_load(Vd_eq, Om_eq, cfg, grid))
     for i in range(0, len(t), max(1, len(t)//250)):
         _, _, phi, al, U2, cl, cd, _ = sb._state(max(Vz[i], 1e-2), max(Om[i], 1e-2), cfg, r, c, theta)
@@ -104,7 +104,7 @@ def _root_load(Vz, Om, cfg, grid):
     r, c, theta = grid; dr = r[1]-r[0]
     _, _, phi, al, U2, cl, cd, _ = sb._state(max(float(Vz), 1e-2), max(float(Om), 1e-2), cfg, r, c, theta)
     q = 0.5*cfg.rho*U2[0]*c
-    dT = (q*cl[0]*np.cos(phi[0]) + q*cd[0]*np.sin(phi[0])) * cfg.n_blades
+    dT = sb.element_thrust(q, cl[0], cd[0], phi[0], cfg.n_blades)
     return float(np.sum(dT*r*dr))
 
 
@@ -142,6 +142,8 @@ if __name__ == '__main__':
     Vd_eq, Om_eq = sb.solve(cfg, mass.m_total)
     print(f"Equilibrium (steady BEM): V_d*={Vd_eq:.2f} m/s, Ω*={Om_eq*60/2/np.pi:.0f} RPM, "
           f"I_spin={Izz*1e4:.2f}e-4 kg·m² (about CG)")
+    print(f"  [baseline note] SAMARA Ro≈5.45 — outside the optimiser's feasibility band [3,4]; "
+          f"see README 'Headline-geometry caveat'.")
 
     # stable-attractor check
     J, eig, _, _ = jacobian(cfg, mass)
