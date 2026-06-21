@@ -140,7 +140,9 @@ if __name__ == '__main__':
     opt = optimum(recs)
     if opt:
         # local pitch refine at the optimum's chord (grid θ step is coarse)
-        fine = [evaluate(s_chord=opt['s_chord'], theta_deg=th) for th in np.arange(-1.0, -6.0, 0.25)]
+        refine_thetas = np.arange(-6.0, -1.0, 0.25)            # ascending: a reversed range is empty
+        assert len(refine_thetas) > 0, "pitch-refine grid is empty (check np.arange direction)"
+        fine = [evaluate(s_chord=opt['s_chord'], theta_deg=th) for th in refine_thetas]
         fine = [r for r in fine if r['feasible']]
         opt = min(fine, key=lambda r: r['Vd']) if fine else opt
         print(f"\nOPTIMUM (slowest feasible descent within the Ro window):")

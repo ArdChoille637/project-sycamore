@@ -39,7 +39,7 @@ import numpy as np
 import samara_bem as sb
 import samara_mass as sm
 
-G = 9.81
+G = sb.G          # single source of truth (samara_bem)
 
 
 def thrust_center(cfg, m_kg):
@@ -50,7 +50,7 @@ def thrust_center(cfg, m_kg):
     dr = r[1] - r[0]
     _, _, phi, al, U2, cl, cd, _ = sb._state(Vd, Om, cfg, r, c, theta)
     q  = 0.5 * cfg.rho * U2[0] * c
-    dT = (q*cl[0]*np.cos(phi[0]) + q*cd[0]*np.sin(phi[0])) * cfg.n_blades   # per unit span
+    dT = sb.element_thrust(q, cl[0], cd[0], phi[0], cfg.n_blades)           # per unit span (shared kernel)
     T  = float(np.sum(dT * dr))
     r_cp = float(np.sum(r * dT * dr) / T)
     return Vd, Om, T, r_cp
@@ -95,6 +95,8 @@ def report(cfg, m_kg=0.075, mass=None, title='Sycamore device (samara-realistic)
     print(f"\n{'═'*64}\n  Single-wing 1/rev dynamics — {title}\n{'═'*64}")
     print(f"  equilibrium: V_d={d['Vd']:.2f} m/s,  Ω={d['spin_rpm']:.0f} RPM = "
           f"{d['spin_hz']:.1f} Hz  (I_spin={d['I_spin']*1e4:.2f}e-4, I_t={d['I_t']*1e4:.2f}e-4)")
+    print(f"  [baseline note] SAMARA Ro≈5.45 — outside the optimiser's feasibility band [3,4]; "
+          f"1/rev loads scale with Ω², so a feasible Ro≈3 (≈480 RPM) geometry would cut them ~0.55×.")
     print(f"\n  A — spin blur: a body-fixed sensor sweeps the world at {d['spin_hz']:.1f} Hz.")
     print(f"      For ≤5 mrad smear, exposure must be < {d['t_exp_max_us']:.0f} µs — "
           f"⇒ de-spin the sensor or strobe in sync with Ω.")

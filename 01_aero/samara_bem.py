@@ -108,6 +108,21 @@ class Config:
         return r, c, th
 
 
+# ── Per-element force kernels (single source of truth for the FBD sign
+#    convention so the duplicated thrust/torque expressions can't desync) ───
+def element_thrust(q, cl, cd, phi, n_blades):
+    """Per-element axial load per unit span. Descent/windmill FBD:
+    T' = (L cosφ + D sinφ)·n_blades, with q = ½ρU²c (drag's axial component
+    supports weight). Used by forces(), _state(), and the downstream modules."""
+    return (q*cl*np.cos(phi) + q*cd*np.sin(phi)) * n_blades
+
+
+def element_torque(q, cl, cd, phi, r, n_blades):
+    """Per-element torque per unit span: Q'/dr = r·(L sinφ − D cosφ)·n_blades
+    (lift drives, drag brakes)."""
+    return r * (q*cl*np.sin(phi) - q*cd*np.cos(phi)) * n_blades
+
+
 # ── Per-element flow state (momentum induced inflow + Prandtl tip loss) ────
 def _state(Vd, Om, cfg, r, c, theta, n_it=15):
     """Flow state at each blade element. Vd may be scalar or a (nv,) array;
@@ -129,10 +144,9 @@ def _state(Vd, Om, cfg, r, c, theta, n_it=15):
             F = np.maximum((2 / np.pi) * np.arccos(np.clip(np.exp(-f), 0.0, 1.0)), 1e-4)
         else:
             F = 1.0
-        # blade-element axial load per unit span. Descent/windmill FBD: drag's
-        # axial component SUPPORTS weight, so thrust = L cosφ + D sinφ (see
-        # forces()); the +cd·sinφ sign matches the L sinφ − D cosφ torque.
-        dT_be = 0.5 * cfg.rho * U2 * c[None, :] * (cl*np.cos(phi) + cd*np.sin(phi)) * cfg.n_blades
+        # blade-element axial load per unit span (shared kernel; see element_thrust).
+        q_be  = 0.5 * cfg.rho * U2 * c[None, :]
+        dT_be = element_thrust(q_be, cl, cd, phi, cfg.n_blades)
         # momentum per annulus: dT/dr = 4π ρ r (Vd − v_i) v_i F cosβ, a downward
         # parabola in v_i peaking at v_i=Vd/2 (value a_·Vd²/4). Take the smaller
         # (lightly-loaded) root; when the blade load exceeds the momentum peak
@@ -160,10 +174,8 @@ def forces(Vd, Om, cfg, grid):
     dr = r[1] - r[0]
     _, _, phi, al, U2, cl, cd, _ = _state(Vd, Om, cfg, r, c, theta)
     q  = 0.5 * cfg.rho * U2 * c[None, :]
-    # Descent/windmill FBD: T = L cosφ + D sinφ (drag's axial component supports
-    # weight); driving torque Q/r = L sinφ − D cosφ (lift drives, drag brakes).
-    dT = (q*cl*np.cos(phi) + q*cd*np.sin(phi)) * cfg.n_blades
-    dQ = r[None, :] * (q*cl*np.sin(phi) - q*cd*np.cos(phi)) * cfg.n_blades
+    dT = element_thrust(q, cl, cd, phi, cfg.n_blades)
+    dQ = element_torque(q, cl, cd, phi, r[None, :], cfg.n_blades)
     T  = np.sum(dT * dr, axis=1)
     Q  = np.sum(dQ * dr, axis=1)
     return T, Q
@@ -347,6 +359,13 @@ SAMARA = Config(name='Sycamore device — samara-realistic (HEADLINE)',
                 R=0.30, c_root=0.08, c_tip=0.03,
                 theta_root_deg=-2.6, theta_tip_deg=-2.6,  # real Sycamore-A pitch
                 alpha_sign=+1.0, cl_alpha=5.3, cd0=0.025)
+# NOTE (joint review 2026-06-20): this headline geometry sits at Rossby R/c̄ ≈ 5.45,
+# OUTSIDE the stable-LEV / valid-strip-theory band [3,4] that samara_optimize.py argues
+# for (the optimiser flags SAMARA as infeasible; its feasible optimum is a wider-chord
+# Ro≈3.03 geometry that is NOT adopted here). Kept as the engineering baseline pending a
+# resolved-Re CFD spot-check — the optimum is itself locally non-slender (root chord ≈ ½ the
+# hub radius) and its descent edge is a soft-Ro-threshold result, so neither geometry is yet
+# the validated answer. See README "Headline-geometry caveat" + SHARED_MEMORY.md review notes.
 
 # NOTE: LEGACY is a DEPRECATED ARTIFACT, not a physics comparison. alpha_sign=−1
 # (α=θ−φ) is geometrically wrong for a pitched rigid blade in inflow (the real
@@ -401,7 +420,7 @@ if __name__ == '__main__':
         _, _, phi, al, U2, cl, cd, _ = _state(Vd_s, Om_s, SAMARA, *grid)
         al = al[0]; phi = phi[0]; U2 = U2[0]; cl = cl[0]; cd = cd[0]
         q  = 0.5*SAMARA.rho*U2*c
-        dQ = r*(q*cl*np.sin(phi) - q*cd*np.cos(phi))*SAMARA.n_blades
+        dQ = element_torque(q, cl, cd, phi, r, SAMARA.n_blades)
         ax2 = ax[2]; ax2b = ax2.twinx()
         ax2.fill_between(r/SAMARA.R, dQ, 0, where=dQ>0, alpha=0.25, color='green', label='driving')
         ax2.fill_between(r/SAMARA.R, dQ, 0, where=dQ<0, alpha=0.25, color='red', label='braking')
