@@ -22,10 +22,12 @@ Four effects:
       world sweep past at Ω → exposure ≪ 1/Ω, i.e. de-spin or an Ω-synced strobe.
   B — 1/rev vibration: if not radially balanced, the hub (sensor/core) orbits the
       true CG at radius r_cg → centripetal accel a = Ω²·r_cg.
-  C — Coning tilt: the single wing's offset thrust is a steady (body-frame)
-      overturning moment M = W·r_cp that tilts the spin axis by a coning angle β,
-      balanced by the gyroscopic restoring (I_t − I_spin)·Ω²·sinβcosβ. An
-      off-axis body-fixed sensor sees β as a 1/rev wobble.
+  C — Spin-axis tilt (gyroscopic): the single wing's offset thrust is a steady
+      (body-frame) overturning moment M = W·r_cp that tilts the SPIN AXIS by an
+      angle β (a whole-body gyroscopic tilt — distinct from the blade-flap
+      coning `blade_coning_deg` in samara_bem), balanced by the gyroscopic
+      restoring (I_t − I_spin)·Ω²·sinβcosβ. An off-axis body-fixed sensor sees
+      β as a 1/rev wobble.
   D — Decoupled core: the ferrofluid-decoupled, non-spinning core at the CG is the
       mitigation for A+B+C; this module quantifies its isolation spec.
 
@@ -74,19 +76,19 @@ def one_rev(cfg, m_kg=0.075, mass=None, blur_tol_mrad=5.0, g_budget=1.0):
     a_orbit   = Om**2 * r_cg
     r_cg_budget = g_budget*G / Om**2        # max CG offset to keep 1/rev < g_budget
 
-    # C — coning tilt from the offset-thrust overturning moment
+    # C — gyroscopic spin-axis tilt from the offset-thrust overturning moment
     M_over = W * r_cp                       # body-frame-steady overturning moment
     K = (I_t - I_spin) * Om**2              # gyroscopic restoring stiffness (Gemini's fix)
     ratio = 2*M_over / K                    # M_over = (K/2)·sin(2β)
     saturated = bool(abs(ratio) > 1.0)
-    beta = 0.5*np.arcsin(np.clip(ratio, -1, 1))
+    axis_tilt = 0.5*np.arcsin(np.clip(ratio, -1, 1))
 
     return dict(Vd=Vd, Om=Om, spin_hz=f, spin_rpm=Om*60/(2*np.pi),
                 t_exp_max_us=t_exp_max*1e6,
                 r_cg_cm=r_cg*100, a_orbit_ms2=a_orbit, a_orbit_g=a_orbit/G,
                 r_cg_budget_mm=r_cg_budget*1e3, g_budget=g_budget,
                 r_cp_cm=r_cp*100, M_over=M_over, K_restoring=K,
-                beta_deg=np.degrees(beta), coning_saturated=saturated,
+                axis_tilt_deg=np.degrees(axis_tilt), axis_tilt_saturated=saturated,
                 I_spin=I_spin, I_t=I_t)
 
 
@@ -105,17 +107,17 @@ def report(cfg, m_kg=0.075, mass=None, title='Sycamore device (samara-realistic)
           f"= {d['a_orbit_g']:.0f} g of 1/rev shake.")
     print(f"      ⇒ balance the CG to within {d['r_cg_budget_mm']:.1f} mm of the hub to keep "
           f"1/rev < {d['g_budget']:.0f} g, or isolate via the decoupled core.")
-    print(f"\n  C — coning tilt: offset thrust ⇒ overturning moment M=W·r_cp "
+    print(f"\n  C — spin-axis tilt (gyroscopic): offset thrust ⇒ overturning moment M=W·r_cp "
           f"(r_cp={d['r_cp_cm']:.1f} cm) = {d['M_over']*1e3:.0f} mN·m;")
     print(f"      gyroscopic restoring (I_t−I_spin)·Ω² = {d['K_restoring']*1e3:.0f} mN·m ⇒ "
-          f"coning β ≈ {d['beta_deg']:.0f}°"
-          + ("  ⚠ SATURATED (aero moment exceeds restoring → tumble risk)" if d['coning_saturated'] else ""))
+          f"spin-axis tilt β ≈ {d['axis_tilt_deg']:.0f}°"
+          + ("  ⚠ SATURATED (aero moment exceeds restoring → tumble risk)" if d['axis_tilt_saturated'] else ""))
     print(f"      An OFF-axis body-fixed sensor sees this β as a 1/rev wobble "
           f"(an on-spin-axis sensor sees a steady tilt).")
     print(f"\n  D — decoupled-core spec: the non-spinning core at the CG must reject "
           f"spin {d['spin_hz']:.1f} Hz / {d['spin_rpm']:.0f} RPM,")
     print(f"      the 1/rev vibration (up to ~{d['a_orbit_g']:.0f} g unbalanced) and the "
-          f"β≈{d['beta_deg']:.0f}° coning wobble — all at {d['spin_hz']:.1f} Hz.")
+          f"β≈{d['axis_tilt_deg']:.0f}° spin-axis-tilt wobble — all at {d['spin_hz']:.1f} Hz.")
     return d
 
 
