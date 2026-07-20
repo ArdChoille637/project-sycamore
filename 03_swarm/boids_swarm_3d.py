@@ -36,27 +36,47 @@ R_LINK_VIS  = 140.0              # only draw comm links shorter than this (mesh 
 
 # ── OBJ silhouette (top-down, for 2-D disc rendering at altitude) ──────────────
 
+def _synthetic_samara():
+    """Top-down samara planform (rounded seed root → tapering wing tip), used
+    when OBJ_PATH is unavailable. Same contract as the OBJ silhouette: (M,2),
+    major axis along +x, unit chord — so _disc_polys_all() is agnostic to the
+    source. Keeps the renderers runnable without the external asset."""
+    th = np.linspace(0.0, np.pi, 28)
+    x  = (1.0 - np.cos(th)) / 2.0                      # 0 (seed) → 1 (tip)
+    w  = 0.20 * np.sin(th) ** 1.25 * (1.0 - 0.35 * x)  # half-width, tapers tipward
+    hp = np.vstack([np.column_stack([x, w]),
+                    np.column_stack([x, -w])[::-1]])   # closed wing outline
+    hp -= hp.mean(axis=0)
+    hp /= (hp[:, 0].max() - hp[:, 0].min())            # unit chord
+    return hp.astype('f4')
+
+
 def _load_silhouette():
-    verts = []
-    with open(OBJ_PATH) as fh:
-        for ln in fh:
-            if ln.startswith('v '):
-                p = ln.split()
-                verts.append([float(p[1]), float(p[3])])   # x, z
-    v    = np.array(verts)
-    hull = ConvexHull(v)
-    hp   = v[hull.vertices].copy()
-    hp  -= hp.mean(axis=0)
-    cov  = np.cov(hp.T)
-    evl, evc = np.linalg.eigh(cov)
-    major = evc[:, np.argmax(evl)]
-    ang   = np.arctan2(major[1], major[0])
-    c, s  = np.cos(-ang), np.sin(-ang)
-    hp    = (np.array([[c, -s], [s, c]]) @ hp.T).T
-    if hp[:, 0].max() < abs(hp[:, 0].min()):
-        hp[:, 0] *= -1
-    hp /= (hp[:, 0].max() - hp[:, 0].min())   # unit chord length
-    return hp.astype('f4')                      # (M, 2)
+    """OBJ hull silhouette if OBJ_PATH exists, else a synthetic samara planform
+    (the OBJ is an optional external asset; its absence must not crash import)."""
+    try:
+        verts = []
+        with open(OBJ_PATH) as fh:
+            for ln in fh:
+                if ln.startswith('v '):
+                    p = ln.split()
+                    verts.append([float(p[1]), float(p[3])])   # x, z
+        v    = np.array(verts)
+        hull = ConvexHull(v)
+        hp   = v[hull.vertices].copy()
+        hp  -= hp.mean(axis=0)
+        cov  = np.cov(hp.T)
+        evl, evc = np.linalg.eigh(cov)
+        major = evc[:, np.argmax(evl)]
+        ang   = np.arctan2(major[1], major[0])
+        c, s  = np.cos(-ang), np.sin(-ang)
+        hp    = (np.array([[c, -s], [s, c]]) @ hp.T).T
+        if hp[:, 0].max() < abs(hp[:, 0].min()):
+            hp[:, 0] *= -1
+        hp /= (hp[:, 0].max() - hp[:, 0].min())   # unit chord length
+        return hp.astype('f4')                      # (M, 2)
+    except Exception:                               # missing/unreadable OBJ → synthetic
+        return _synthetic_samara()
 
 SILHOUETTE = _load_silhouette()
 

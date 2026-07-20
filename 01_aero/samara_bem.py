@@ -60,11 +60,12 @@ Outputs :  console report (samara + legacy configs) + output/samara_bem.png
 import numpy as np
 from dataclasses import dataclass
 from scipy.optimize import brentq
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 import os
-os.makedirs('output', exist_ok=True)
+# NOTE: matplotlib is imported LAZILY in __main__ (not here) so that importing
+# this module for its physics (solve/Config — e.g. by 03_swarm/dispersal.py's
+# live renderer) binds NO backend and has no import-time side effects. A library
+# module must not force a global backend; that would break any downstream live
+# window. plt is only used in __main__ below.
 
 G       = 9.81
 NU_AIR  = 1.5e-5     # kinematic viscosity of air [m²/s] (for section Reynolds)
@@ -380,6 +381,11 @@ LEGACY = Config(name='Sycamore device — LEGACY 35°/20° (DEPRECATED wrong-con
 
 
 if __name__ == '__main__':
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    os.makedirs('output', exist_ok=True)
+
     # 1) credibility anchor
     v = validate_sycamore_A()
     print(f"\n[validation] Sycamore A: V_d={v['Vd']:.2f} m/s (paper ≈0.97), "
