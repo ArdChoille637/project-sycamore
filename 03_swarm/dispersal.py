@@ -226,6 +226,20 @@ def fire_area_points(spacing=40.0):
     return P[inside].astype('f4')
 
 
+def _swept_mask(traj, rel, pts):
+    """Bool mask over `pts`: covered by some unit's capped FOV footprint at ANY
+    frame of the descent. traj is (n_t, M, 3); footprint radius uses the shared
+    per-frame altitude traj[k,0,1]. Taking traj[:, :M] gives a nested sub-fleet,
+    so coverage is monotone in M by construction."""
+    ever = np.zeros(len(pts), dtype=bool)
+    for k in range(len(traj)):
+        r_f = _fov_radius(traj[k, 0, 1], rel)              # shared altitude at step k
+        pxz = traj[k][:, [0, 2]]                            # (M,2)
+        dmin = np.linalg.norm(pts[:, None, :] - pxz[None, :, :], axis=2).min(axis=1)
+        ever |= (dmin < r_f)
+    return ever
+
+
 def coverage(res, area_pts=None, perim=None):
     """Coverage of the fire during descent.
 
@@ -238,19 +252,8 @@ def coverage(res, area_pts=None, perim=None):
         area_pts = fire_area_points()
     if perim is None:
         perim = sc.PERIM
-    t, traj = res['t'], res['traj']
-
-    def _swept(pts):
-        ever = np.zeros(len(pts), dtype=bool)
-        for k in range(len(t)):
-            r_f = _fov_radius(traj[k, 0, 1], rel)          # shared altitude at step k
-            pxz = traj[k][:, [0, 2]]                        # (M,2)
-            dmin = np.linalg.norm(pts[:, None, :] - pxz[None, :, :], axis=2).min(axis=1)
-            ever |= (dmin < r_f)
-        return ever
-
-    area_mask = _swept(area_pts)
-    perim_mask = _swept(perim)
+    area_mask = _swept_mask(res['traj'], rel, area_pts)
+    perim_mask = _swept_mask(res['traj'], rel, perim)
     return dict(area=float(area_mask.mean()), perim=float(perim_mask.mean()),
                 area_pts=area_pts, area_mask=area_mask, perim_mask=perim_mask)
 
@@ -262,24 +265,31 @@ def coverage(res, area_pts=None, perim=None):
 def sweep(fleet, alts, base: Release = None, n_t=30):
     """Fire-AREA coverage over a grid of (fleet size × release altitude).
 
-    Answers the operational design question: how many samaras, released from
-    how high, to blanket what fraction of the fire? Returns (len(fleet),
-    len(alts))."""
+    Answers the operational design question: how many samaras, released from how
+    high, to blanket what fraction of the fire? Returns (len(fleet), len(alts)).
+
+    To isolate the fleet-size effect from resampling noise, each altitude
+    simulates the MAX fleet ONCE and every smaller fleet is the first-M NESTED
+    subset of that same cloud (traj[:, :M]) — so coverage is monotone in M by
+    construction, not up to RNG luck. (Also faster: len(alts) sims, not the
+    product.)"""
     base = base or Release()
     solve_descent(base)
     area_pts = fire_area_points()
+    fleet = [int(m) for m in fleet]
+    m_max = max(fleet)
     cov = np.zeros((len(fleet), len(alts)), dtype=float)
-    for i, m in enumerate(fleet):
-        for j, a in enumerate(alts):
-            rel = Release(M=int(m), mass_kg=base.mass_kg, alt=float(a),
-                          offset_up=base.offset_up, w_along=base.w_along,
-                          w_cross=base.w_cross, turb_i=base.turb_i,
-                          wind_ms=base.wind_ms, wind_from=base.wind_from,
-                          spinup=base.spinup, fov_deg=base.fov_deg,
-                          r_det_max=base.r_det_max, seed=base.seed, cfg=base.cfg)
-            rel.Vd = base.Vd; rel.rpm = base.rpm
-            res = simulate(rel, n_t=n_t)
-            cov[i, j] = coverage(res, area_pts=area_pts)['area']
+    for j, a in enumerate(alts):
+        rel = Release(M=m_max, mass_kg=base.mass_kg, alt=float(a),
+                      offset_up=base.offset_up, w_along=base.w_along,
+                      w_cross=base.w_cross, turb_i=base.turb_i,
+                      wind_ms=base.wind_ms, wind_from=base.wind_from,
+                      spinup=base.spinup, fov_deg=base.fov_deg,
+                      r_det_max=base.r_det_max, seed=base.seed, cfg=base.cfg)
+        rel.Vd = base.Vd; rel.rpm = base.rpm
+        traj = simulate(rel, n_t=n_t)['traj']
+        for i, m in enumerate(fleet):
+            cov[i, j] = float(_swept_mask(traj[:, :m], rel, area_pts).mean())
     return cov
 
 
@@ -330,11 +340,15 @@ def validate():
     print(f"  [{'PASS' if p4 else 'FAIL'}] drift monotone in altitude: "
           f"{d_lo:.0f} m @200 m < {d_hi:.0f} m @600 m")
 
-    # 5) coverage sanity: a fraction in [0,1], and more fleet ⇒ ≥ coverage.
-    c_lo = coverage(simulate(Release(M=40), n_t=30))['area']
-    c_hi = coverage(simulate(Release(M=300), n_t=30))['area']
-    p5 = (0.0 <= c_lo <= 1.0) and (0.0 <= c_hi <= 1.0) and (c_hi >= c_lo - 1e-6); ok &= p5
-    print(f"  [{'PASS' if p5 else 'FAIL'}] area coverage monotone in fleet: "
+    # 5) coverage sanity: a fraction in [0,1], and more fleet ⇒ ≥ coverage —
+    #    tested on NESTED subsets of ONE cloud (the way sweep() does it), so it
+    #    is a true invariant, not up to RNG luck (a subset can only cover less).
+    relm = Release(M=300); solve_descent(relm)
+    trajm = simulate(relm, n_t=30)['traj']; ap = fire_area_points()
+    c_lo = float(_swept_mask(trajm[:, :40],  relm, ap).mean())
+    c_hi = float(_swept_mask(trajm[:, :300], relm, ap).mean())
+    p5 = (0.0 <= c_lo <= 1.0) and (0.0 <= c_hi <= 1.0) and (c_hi >= c_lo - 1e-12); ok &= p5
+    print(f"  [{'PASS' if p5 else 'FAIL'}] area coverage monotone in fleet (nested): "
           f"{c_lo*100:.0f}% @M=40 ≤ {c_hi*100:.0f}% @M=300")
 
     print(f"{'─'*64}\n  {'ALL PASS ✓' if ok else 'FAILURES ✗'}\n")
