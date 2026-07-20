@@ -15,6 +15,9 @@ env/
 # Manim build artifacts (regenerable, large)
 media/
 
+# Generated figures (regenerable per-module output)
+output/
+
 # Cached fetched data (DEM / fuel rasters live in /tmp by default; ignore if copied in)
 *.npy
 data/cache/
