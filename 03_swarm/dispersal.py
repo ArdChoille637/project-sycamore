@@ -131,8 +131,9 @@ def wind_frame(from_deg):
 
 def uniform_wind_field(speed, from_deg):
     """Constant wind everywhere. `field.uniform=True` lets simulate() take the
-    exact closed-form path (byte-identical to the pre-resolved behaviour)."""
-    w = wind_vector(speed, from_deg).astype('f4')
+    exact closed-form path (it reads the constant back from this field, so a
+    caller-supplied uniform field is honoured — not just the Release's wind)."""
+    w = wind_vector(speed, from_deg)                     # f64 → exact w2 for the default
     def field(P):
         return np.broadcast_to(w, (len(P), 2)).copy()
     field.uniform = True
@@ -244,7 +245,7 @@ def simulate(rel: Release, n_t=60, wind_field=None):
     release_mean = p0.mean(axis=0)
 
     # per-unit frozen wind gust: spread from spatial wind variability (∝ wind)
-    gust = rng.normal(0, rel.turb_i * rel.wind_ms, (M, 2)).astype('f4')
+    gust = rng.normal(0, rel.turb_i * rel.wind_ms, (M, 2))
 
     T = descent_time(rel)
     t = np.linspace(0, T, n_t)
@@ -255,7 +256,10 @@ def simulate(rel: Release, n_t=60, wind_field=None):
     alt = np.clip(alt, 0.0, None)
 
     if getattr(field, 'uniform', False):
-        # exact closed-form linear drift (unchanged behaviour, byte-identical)
+        # exact closed-form linear drift. Read the constant back FROM the field
+        # (honours a caller-supplied uniform field); for the default field built
+        # from rel this equals w2 exactly → byte-identical.
+        w2 = field(p0[:1])[0]
         vx = w2[0] + gust[:, 0];  vz = w2[1] + gust[:, 1]
         X = p0[:, 0][None, :] + vx[None, :] * t[:, None]
         Z = p0[:, 1][None, :] + vz[None, :] * t[:, None]
