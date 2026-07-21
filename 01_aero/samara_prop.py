@@ -75,7 +75,7 @@ def hover_cut_ic(cfg, m_kg=0.075, D_p=0.10, FM=0.65):
     at the cut the vehicle is already inside the autorotation basin of attraction.
     Returns the transient IC plus the hover operating point for the record."""
     W = m_kg * G
-    h = hover_disk(W, D_p, FM)
+    h = hover_disk(W, D_p, FM, rho=cfg.rho)        # same density as the Ω* solve below
     _, Om_star = sb.solve(cfg, m_kg)              # Ω* — single source (samara_bem)
     return dict(Vz0=0.0, Om0=Om_star, hover=h, P_hover_W=h['P_real'])
 
