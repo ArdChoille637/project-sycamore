@@ -43,6 +43,7 @@ import matplotlib.pyplot as plt
 import os
 import samara_bem as sb
 import samara_mass as sm
+import samara_prop as sp
 
 G = sb.G          # single source of truth (samara_bem)
 os.makedirs('output', exist_ok=True)
@@ -152,9 +153,15 @@ if __name__ == '__main__':
           f"→ {'STABLE attractor ✓' if np.all(re < 0) else 'UNSTABLE ✗'} "
           f"(τ ≈ {1/abs(re).min():.1f} s slow mode)")
 
-    # nominal transition: powered hold-altitude (V_z0=0) at autorotation spin → cut
-    nom = transition(cfg, mass, Vz0=0.0, Om0=Om_eq)
-    print(f"\n[transition · nominal]  IC V_z0=0 (hover), Ω0=Ω*")
+    # nominal transition: IC from the powered-hover cut (samara_prop.hover_cut_ic)
+    # — the active→passive hand-off is now modelled end-to-end, not assumed. Hover
+    # holds altitude (V_z0=0) at the autorotation spin (Ω0=Ω*), so the prop hands
+    # off directly INTO the autorotation basin.
+    ic  = sp.hover_cut_ic(cfg, mass.m_total)
+    nom = transition(cfg, mass, Vz0=ic['Vz0'], Om0=ic['Om0'])
+    print(f"\n[transition · nominal]  IC from samara_prop hover-cut: "
+          f"V_z0={ic['Vz0']:.1f} (hover), Ω0=Ω*={ic['Om0']*60/2/np.pi:.0f} RPM, "
+          f"P_hover={ic['P_hover_W']:.1f} W")
     print(f"  converged to autorotation: {nom['converged']}  (final V_z={nom['Vz'][-1]:.2f}, "
           f"final Ω={nom['Om'][-1]*60/2/np.pi:.0f} RPM)")
     print(f"  settling time (±2%): {nom['t_settle']:.1f} s   altitude descended to settle: "

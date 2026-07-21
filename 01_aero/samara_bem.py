@@ -90,7 +90,8 @@ class Config:
     theta_tip_deg:  float = 0.0       # tip pitch [deg]
     hub_frac:       float = 0.15      # root cutout as fraction of R
     n_blades:       int   = 1
-    coning_deg:     float = 10.0      # coning angle β [deg]
+    blade_coning_deg: float = 10.0    # blade flap coning angle β [deg] (rotor coning, NOT the
+                                      # gyroscopic spin-axis tilt in samara_1rev — distinct DOF)
     alpha_sign:     float = +1.0      # +1: α=θ+φ (samara) | −1: α=θ−φ (legacy)
     cl_alpha:       float = 5.3       # LEV lift-curve-slope parameter [1/rad]
     cd0:            float = 0.025      # zero-lift drag coefficient [-]
@@ -130,7 +131,7 @@ def _state(Vd, Om, cfg, r, c, theta, n_it=15):
     returns fields broadcast to (nv, ne)."""
     Vd = np.atleast_1d(np.asarray(Vd, float))[:, None]   # (nv, 1)
     Ut = (Om * r)[None, :]                                # (1, ne)
-    cb = np.cos(np.deg2rad(cfg.coning_deg))
+    cb = np.cos(np.deg2rad(cfg.blade_coning_deg))
     vi = np.zeros((Vd.shape[0], r.size))                  # (nv, ne)
 
     for _ in range(n_it if cfg.induced else 0):
@@ -306,7 +307,7 @@ def validate_sycamore_A():
     """Run the model on the paper's measured Sycamore A and check it reproduces
     a slow (sub-1 m/s) samara descent with root-high/tip-low α."""
     A = Config(name='Sycamore A (validation)', R=0.0447, c_root=0.0115, c_tip=0.0115,
-               theta_root_deg=-2.6, theta_tip_deg=-2.6, hub_frac=0.12, coning_deg=10.0,
+               theta_root_deg=-2.6, theta_tip_deg=-2.6, hub_frac=0.12, blade_coning_deg=10.0,
                cl_alpha=5.8, cd0=0.032, rho=1.225, n_elem=60)
     Vd, Om = solve(A, 0.000232)
     grid = A.grid()

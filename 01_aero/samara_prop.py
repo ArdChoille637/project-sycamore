@@ -63,6 +63,23 @@ def climb_disk(T, V, D_p, FM=0.65, rho=RHO):
     return dict(D_p=D_p, V=V, v_i=v_i, P_ideal=P_ideal, P_real=P_ideal/FM)
 
 
+def hover_cut_ic(cfg, m_kg=0.075, D_p=0.10, FM=0.65):
+    """Active→passive hand-off INITIAL CONDITION at engine cut — the (V_z0, Ω0)
+    the samara_transient 2-DOF solver should start from, computed here instead of
+    assumed there.
+
+    Powered hover HOLDS ALTITUDE, so the craft descent rate is zero (**V_z0 = 0**):
+    the prop induced velocity v_i is disk THROUGHFLOW, not the craft's vertical
+    velocity — do NOT seed V_z0 with it. The samara is already turning at its
+    autorotation equilibrium, so **Ω0 = Ω*** (from samara_bem.solve), NOT ~0. So
+    at the cut the vehicle is already inside the autorotation basin of attraction.
+    Returns the transient IC plus the hover operating point for the record."""
+    W = m_kg * G
+    h = hover_disk(W, D_p, FM, rho=cfg.rho)        # same density as the Ω* solve below
+    _, Om_star = sb.solve(cfg, m_kg)              # Ω* — single source (samara_bem)
+    return dict(Vz0=0.0, Om0=Om_star, hover=h, P_hover_W=h['P_real'])
+
+
 def prop_motor_mass_g(D_p, P_real):
     """Indicative prop+motor mass: blade ∝ D_p² + BLDC sized by continuous power."""
     m_prop  = PROP_G_AT_10CM * (D_p/0.10)**2
