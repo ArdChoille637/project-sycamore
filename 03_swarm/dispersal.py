@@ -38,6 +38,7 @@ Run:  ~/ds/bin/python 03_swarm/dispersal.py            # headless static summary
       ~/ds/bin/python 03_swarm/dispersal.py --live     # live interactive descent window
       ~/ds/bin/python 03_swarm/dispersal.py --gif [p]  # headless animation → output/dispersal.gif
       ~/ds/bin/python 03_swarm/dispersal.py --mp4 [p]  # headless animation → output/dispersal.mp4
+      ~/ds/bin/python 03_swarm/dispersal.py --terrain  # RESOLVED terrain-wind demo → output/dispersal_terrain.png
       ~/ds/bin/python 03_swarm/dispersal.py --validate # self-checks only (no matplotlib)
 
 Live vs headless is chosen by the entry point, not hardcoded: --live selects the
@@ -51,8 +52,12 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-# Phase-1 aero (the Validated descent rate) and the shared fire target.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '01_aero'))
+# Phase-1 aero (the Validated descent rate) and the shared fire target. 02_fire
+# provides the resolved-wind machinery (terrain_wind.downscale_wind) imported
+# lazily in terrain_wind_field().
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, '..', '01_aero'))
+sys.path.insert(0, os.path.join(_HERE, '..', '02_fire'))
 import samara_bem as sb          # noqa: E402
 import swarm_core as sc          # noqa: E402  (FIRE_A/FIRE_B/PERIM — same fire the patrol covers)
 
@@ -115,6 +120,75 @@ def wind_frame(from_deg):
     return d, c
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Wind fields — uniform (default) or a RESOLVED, spatially-varying field
+#
+#  A wind field is a callable f(P) → V, where P is (M,2) world [East,North] and V
+#  is (M,2) [u,v] velocity. simulate() advects each unit through it. The default
+#  uniform field recovers the exact closed-form linear drift; a resolved field
+#  (terrain-downscaled) curves the trajectories so the cloud follows the flow.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def uniform_wind_field(speed, from_deg):
+    """Constant wind everywhere. `field.uniform=True` lets simulate() take the
+    exact closed-form path (byte-identical to the pre-resolved behaviour)."""
+    w = wind_vector(speed, from_deg).astype('f4')
+    def field(P):
+        return np.broadcast_to(w, (len(P), 2)).copy()
+    field.uniform = True
+    return field
+
+
+def _bilinear(grid, i, j):
+    """Bilinear sample of a 2D grid at fractional (row i, col j), edge-clamped."""
+    H, W = grid.shape
+    i = np.clip(i, 0, H - 1 - 1e-6);  j = np.clip(j, 0, W - 1 - 1e-6)
+    i0 = np.floor(i).astype(int);  j0 = np.floor(j).astype(int)
+    i1 = i0 + 1;  j1 = j0 + 1
+    fi = (i - i0);  fj = (j - j0)
+    return (grid[i0, j0]*(1-fi)*(1-fj) + grid[i0, j1]*(1-fi)*fj
+          + grid[i1, j0]*fi*(1-fj) + grid[i1, j1]*fi*fj)
+
+
+def terrain_wind_field(z, DX, x0, z0, U0, from_deg, **kw):
+    """Resolved wind field from mass-conserving terrain downscaling
+    (02_fire/terrain_wind.downscale_wind — WindNinja core: solves ∇·(d∇φ)=∇·(dV0),
+    V=V0−∇φ, so flow speeds up over ridges and deflects around terrain). `z` is a
+    terrain-height grid (axis0=North, axis1=East); (x0,z0) is the world
+    [East,North] of z[0,0]; DX the spacing [m]. Returns a sampler f(P)→(M,2) with
+    the field grids attached as `field.grids` for plotting.
+
+    NOTE (Indicative): this is a SINGLE near-surface layer — horizontal (x,z)
+    variation is resolved, altitude / boundary-layer variation is NOT. A samara
+    falling from 600 m rides the same 2-D field at every height."""
+    import terrain_wind as tw                            # 02_fire (on sys.path)
+    speed, from_deg_field = tw.downscale_wind(np.asarray(z, 'f8'), DX, U0, from_deg, **kw)
+    toward = np.deg2rad(from_deg_field + 180.0)
+    u = (speed * np.sin(toward)).astype('f4')            # East-component grid
+    v = (speed * np.cos(toward)).astype('f4')            # North-component grid
+
+    def field(P):
+        j = (P[:, 0] - x0) / DX                          # East → column
+        i = (P[:, 1] - z0) / DX                          # North → row
+        return np.column_stack([_bilinear(u, i, j), _bilinear(v, i, j)]).astype('f4')
+    field.uniform = False
+    field.grids = dict(u=u, v=v, speed=speed, z=np.asarray(z, 'f4'),
+                       DX=DX, x0=x0, z0=z0, U0=U0, from_deg=from_deg)
+    return field
+
+
+def synthetic_hill(x0=-1050.0, z0=-720.0, DX=45.0, nx=48, nz=32,
+                   height=280.0, cx=-100.0, cz=0.0, sigma=300.0):
+    """A Gaussian hill terrain spanning the dispersal domain — a self-contained,
+    network-free demo of the resolved field (the eastward flow accelerates over
+    and deflects around it). Returns (z_grid, DX, x0, z0); axis0=North, axis1=East."""
+    E = x0 + np.arange(nx) * DX
+    N = z0 + np.arange(nz) * DX
+    EE, NN = np.meshgrid(E, N)                            # (nz, nx)
+    z = height * np.exp(-((EE - cx)**2 + (NN - cz)**2) / (2 * sigma**2))
+    return z.astype('f4'), DX, x0, z0
+
+
 def solve_descent(rel: Release):
     """Import the Validated terminal autorotation descent rate for this config/mass."""
     Vd, Om = sb.solve(rel.cfg, rel.mass_kg)
@@ -137,23 +211,29 @@ def descent_time(rel: Release):
     return su['t'] + (rel.alt - su['alt']) / rel.Vd
 
 
-def simulate(rel: Release, n_t=60):
+def simulate(rel: Release, n_t=60, wind_field=None):
     """Simulate the dispersal cloud from release to landing.
 
     Returns per-unit trajectory (n_t, M, 3) with x=East, y=alt, z=North.
     Descent is constant-V_d after a spin-up transient. Horizontal motion is
     **wind advection** — a passively autorotating body is a large drag disc with
     little lateral control authority, so it rides the local wind (the classic
-    seed-dispersal model: terminal velocity + wind transport). Cloud SPREAD
-    comes from wind variability across the cloud (each unit rides wind + a
-    frozen per-unit gust, σ_gust = turb_i·|wind|), not a persistent ballistic
-    ejection (which a drag disc would damp in seconds)."""
+    seed-dispersal model: terminal velocity + wind transport).
+
+    `wind_field` (a callable f(P)→(M,2) velocity, e.g. from terrain_wind_field)
+    makes the wind spatially RESOLVED: each unit advects through the local wind
+    at its position, so trajectories curve and the cloud follows the flow. The
+    default (None → uniform_wind_field) keeps the exact closed-form linear drift.
+    Cloud SPREAD comes from wind variability across the cloud (each unit rides
+    wind + a frozen per-unit gust, σ_gust = turb_i·|wind|), not a persistent
+    ballistic ejection (which a drag disc would damp in seconds)."""
     if np.isnan(rel.Vd):
         solve_descent(rel)
     rng = np.random.default_rng(rel.seed)
     M = rel.M
     w2 = wind_vector(rel.wind_ms, rel.wind_from)
     d, c = wind_frame(rel.wind_from)
+    field = wind_field or uniform_wind_field(rel.wind_ms, rel.wind_from)
 
     # release patch: uniform rectangle in the wind-aligned frame, centred
     # offset_up UPWIND of the fire centre.
@@ -161,11 +241,10 @@ def simulate(rel: Release, n_t=60):
     a = rng.uniform(-rel.w_along, rel.w_along, M)         # along-wind coord
     b = rng.uniform(-rel.w_cross, rel.w_cross, M)         # cross-wind coord
     p0 = centre[None, :] + a[:, None] * d[None, :] + b[:, None] * c[None, :]   # (M,2) EN
-    x0, z0 = p0[:, 0], p0[:, 1]
     release_mean = p0.mean(axis=0)
 
     # per-unit frozen wind gust: spread from spatial wind variability (∝ wind)
-    gust = rng.normal(0, rel.turb_i * rel.wind_ms, (M, 2))
+    gust = rng.normal(0, rel.turb_i * rel.wind_ms, (M, 2)).astype('f4')
 
     T = descent_time(rel)
     t = np.linspace(0, T, n_t)
@@ -175,16 +254,31 @@ def simulate(rel: Release, n_t=60):
                    rel.alt - su['alt'] - rel.Vd * (t - su['t']))
     alt = np.clip(alt, 0.0, None)
 
-    vx = w2[0] + gust[:, 0]
-    vz = w2[1] + gust[:, 1]
-    X = x0[None, :] + vx[None, :] * t[:, None]
-    Z = z0[None, :] + vz[None, :] * t[:, None]
+    if getattr(field, 'uniform', False):
+        # exact closed-form linear drift (unchanged behaviour, byte-identical)
+        vx = w2[0] + gust[:, 0];  vz = w2[1] + gust[:, 1]
+        X = p0[:, 0][None, :] + vx[None, :] * t[:, None]
+        Z = p0[:, 1][None, :] + vz[None, :] * t[:, None]
+    else:
+        # advect each unit through the resolved field (RK2 midpoint). The frozen
+        # gust is added to the sampled wind; positions are integrated because the
+        # velocity now depends on position.
+        dt = (t[1] - t[0]) if n_t > 1 else 0.0
+        P = p0.astype('f4').copy()
+        XZ = np.empty((n_t, M, 2), 'f4')
+        for k in range(n_t):
+            XZ[k] = P
+            if k < n_t - 1:
+                v1 = field(P) + gust
+                v2 = field(P + 0.5 * dt * v1) + gust
+                P = P + dt * v2
+        X = XZ[:, :, 0];  Z = XZ[:, :, 1]
     Y = np.broadcast_to(alt[:, None], (n_t, M))
 
     traj = np.stack([X, Y, Z], axis=2).astype('f4')
     land = traj[-1][:, [0, 2]].copy()
     return dict(rel=rel, t=t, traj=traj, land=land, centre=centre,
-                release_mean=release_mean, wind=w2, d=d, c=c, T=T)
+                release_mean=release_mean, wind=w2, d=d, c=c, T=T, wind_field=field)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -350,6 +444,30 @@ def validate():
     p5 = (0.0 <= c_lo <= 1.0) and (0.0 <= c_hi <= 1.0) and (c_hi >= c_lo - 1e-12); ok &= p5
     print(f"  [{'PASS' if p5 else 'FAIL'}] area coverage monotone in fleet (nested): "
           f"{c_lo*100:.0f}% @M=40 ≤ {c_hi*100:.0f}% @M=300")
+
+    # 6) RESOLVED wind field — FLAT terrain must reduce to the uniform result
+    #    exactly (the field-integration path is correct iff a uniform field gives
+    #    the uniform drift).
+    relw = Release(); solve_descent(relw)
+    land_u = simulate(relw, n_t=140)['land'].mean(axis=0)
+    zf, DX, x0, z0 = synthetic_hill(height=0.0)          # flat
+    ff = terrain_wind_field(zf, DX, x0, z0, relw.wind_ms, relw.wind_from)
+    land_f = simulate(relw, n_t=140, wind_field=ff)['land'].mean(axis=0)
+    d_flat = float(np.linalg.norm(land_f - land_u))
+    p6 = d_flat < 0.5; ok &= p6
+    print(f"  [{'PASS' if p6 else 'FAIL'}] resolved field, FLAT terrain == uniform: "
+          f"centroid Δ={d_flat:.3f} m")
+
+    # 7) RESOLVED wind field — a hill deflects the cloud (field is active) and the
+    #    integration is deterministic.
+    zh, DX, x0, z0 = synthetic_hill()
+    fh = terrain_wind_field(zh, DX, x0, z0, relw.wind_ms, relw.wind_from)
+    lh1 = simulate(relw, n_t=140, wind_field=fh)['land']
+    lh2 = simulate(relw, n_t=140, wind_field=fh)['land']
+    d_hill = float(np.linalg.norm(lh1.mean(axis=0) - land_u))
+    p7 = (d_hill > 5.0) and np.array_equal(lh1, lh2); ok &= p7
+    print(f"  [{'PASS' if p7 else 'FAIL'}] resolved field, hill deflects + deterministic: "
+          f"centroid Δ vs uniform={d_hill:.0f} m, reproducible={np.array_equal(lh1, lh2)}")
 
     print(f"{'─'*64}\n  {'ALL PASS ✓' if ok else 'FAILURES ✗'}\n")
     return ok
@@ -640,10 +758,75 @@ def _default_export(ext):
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output', f'dispersal.{ext}')
 
 
+def figure_terrain(out=None):
+    """Demo of the RESOLVED wind field: the cloud advected through a terrain-
+    downscaled wind (synthetic hill) vs the uniform baseline. Headless PNG."""
+    import matplotlib
+    matplotlib.use('Agg')
+    assert matplotlib.get_backend().lower() == 'agg', "could not bind Agg"
+    import matplotlib.pyplot as plt
+    if out is None:
+        out = os.path.join(_HERE, 'output', 'dispersal_terrain.png')
+
+    rel = Release(); solve_descent(rel)
+    zh, DX, x0, z0 = synthetic_hill()
+    field = terrain_wind_field(zh, DX, x0, z0, rel.wind_ms, rel.wind_from, verbose=True)
+    res   = simulate(rel, n_t=140, wind_field=field)     # resolved
+    res_u = simulate(rel, n_t=140)                        # uniform baseline
+    cov   = coverage(res)
+    g = field.grids
+    dfl = float(np.linalg.norm(res['land'].mean(0) - res_u['land'].mean(0)))
+
+    print(f"\n{'═'*64}\n  DISPERSAL — RESOLVED wind field (terrain-downscaled)\n{'═'*64}")
+    print(f"  Ambient wind     : {rel.wind_ms:.1f} m/s from {rel.wind_from:.0f}°   [terrain hill relief {g['z'].max():.0f} m]")
+    print(f"  Resolved field   : speed {g['speed'].min():.2f}–{g['speed'].max():.2f} m/s "
+          f"(mass-conserving downscale — accelerates over crest, slows in lee)   [Indicative]")
+    print(f"  Field limitation : single NEAR-SURFACE layer — horizontal (x,z) variation resolved, "
+          f"altitude/boundary-layer NOT (a 600 m fall rides one 2-D field)   [Indicative]")
+    print(f"  Cloud deflection : landing centroid moves {dfl:.0f} m vs uniform wind")
+    print(f"  Area coverage    : {cov['area']*100:.0f}%  (vs {coverage(res_u)['area']*100:.0f}% uniform)   [Indicative]")
+
+    plt.style.use('dark_background')
+    fig = plt.figure(figsize=(15, 7.2), facecolor='#0d1117')
+    ax = fig.add_axes([0.06, 0.09, 0.82, 0.84]); ax.set_facecolor('#0d1117')
+    nz, nx = g['speed'].shape
+    ext = [g['x0'], g['x0'] + (nx-1)*g['DX'], g['z0'], g['z0'] + (nz-1)*g['DX']]
+    im = ax.imshow(g['speed'], origin='lower', extent=ext, cmap='viridis', alpha=0.85, aspect='equal')
+    ax.contour(g['z'], levels=6, extent=ext, colors='#8b949e', linewidths=0.5, alpha=0.6)  # terrain
+    E = np.linspace(ext[0], ext[1], nx); N = np.linspace(ext[2], ext[3], nz)
+    s = (slice(None, None, 3), slice(None, None, 3))
+    ax.quiver(E[::3], N[::3], g['u'][s], g['v'][s], color='#c9d1d9', alpha=0.5,
+              scale=45, width=0.0018)
+    perim = sc.PERIM
+    ax.plot(np.r_[perim[:,0], perim[0,0]], np.r_[perim[:,1], perim[0,1]], color='#f0883e', lw=2.2, label='fire')
+    step = max(rel.M // 30, 1)
+    for i in range(0, rel.M, step):
+        ax.plot(res['traj'][:, i, 0], res['traj'][:, i, 2], color='#4fc3f7', alpha=0.4, lw=0.7)
+    ax.scatter(res['traj'][0, :, 0], res['traj'][0, :, 2], s=6, color='#8b949e', label='release')
+    ax.scatter(res_u['land'][:,0], res_u['land'][:,1], s=9, color='#6e7681', label='landing (uniform)')
+    ax.scatter(res['land'][:,0], res['land'][:,1], s=11, color='#4fc3f7', label='landing (resolved)')
+    ax.set_xlim(ext[0], ext[1]); ax.set_ylim(ext[2], ext[3])
+    ax.set_xlabel('East [m]', color='#8b949e', fontsize=9); ax.set_ylabel('North [m]', color='#8b949e', fontsize=9)
+    ax.set_title(f'Resolved-wind dispersal — cloud advects through terrain-downscaled flow '
+                 f'(deflection {dfl:.0f} m vs uniform)', color='#c9d1d9', fontsize=11)
+    ax.tick_params(colors='#8b949e', labelsize=8)
+    ax.legend(loc='upper left', fontsize=7, facecolor='#161b22', edgecolor='#30363d', labelcolor='#c9d1d9')
+    cb = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02); cb.set_label('wind speed [m/s]', color='#8b949e', fontsize=8)
+    cb.ax.tick_params(colors='#8b949e', labelsize=7)
+    fig.text(0.06, 0.985, 'Project Sycamore — resolved wind field  [terrain downscale Indicative, near-surface layer; V_d Validated]',
+             color='#c9d1d9', fontsize=11, va='top')
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    fig.savefig(out, dpi=120, facecolor='#0d1117'); plt.close(fig)
+    print(f"\nSaved {out}")
+    return out
+
+
 if __name__ == '__main__':
     args = sys.argv[1:]
     if '--validate' in args:
         sys.exit(0 if validate() else 1)
+    elif '--terrain' in args:
+        figure_terrain()                             # resolved-wind demo → PNG
     elif '--live' in args:
         animate()                                    # interactive window
     elif '--gif' in args:
