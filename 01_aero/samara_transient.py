@@ -37,16 +37,14 @@ Run:  ~/ds/bin/python samara_transient.py
 
 import numpy as np
 from scipy.integrate import solve_ivp
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 import os
 import samara_bem as sb
 import samara_mass as sm
 import samara_prop as sp
 
 G = sb.G          # single source of truth (samara_bem)
-os.makedirs('output', exist_ok=True)
+# NOTE: matplotlib is imported lazily in __main__ (not here) so importing this
+# module for physics binds no backend / has no import-time side effects.
 
 
 def _TQ(Vz, Om, cfg, grid):
@@ -137,6 +135,11 @@ def basin(cfg, mass, vz_grid=None, om_grid=None, t_max=30.0):
 
 
 if __name__ == '__main__':
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    os.makedirs('output', exist_ok=True)
+
     cfg = sb.SAMARA
     mass = sm.MassModel(cfg=cfg, m_total=0.075)
     Izz = mass.properties()['I_spin']

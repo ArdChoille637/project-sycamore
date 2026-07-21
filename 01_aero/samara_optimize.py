@@ -39,13 +39,11 @@ Run:  ~/ds/bin/python samara_optimize.py
 """
 
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 import os
 import samara_bem as sb
 
-os.makedirs('output', exist_ok=True)
+# NOTE: matplotlib is imported lazily in __main__ (not here) so importing this
+# module for physics binds no backend / has no import-time side effects.
 
 C_ROOT0, C_TIP0 = 0.08, 0.03      # baseline chords [m]
 CBAR0 = 0.5*(C_ROOT0 + C_TIP0)
@@ -128,6 +126,11 @@ def rossby_sensitivity(recs):
 
 
 if __name__ == '__main__':
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    os.makedirs('output', exist_ok=True)
+
     base = evaluate(s_chord=1.0, theta_deg=-2.6)
     print(f"Baseline geometry: V_d={base['Vd']:.2f} m/s, {base['rpm']:.0f} RPM, "
           f"Ro={base['rossby']:.2f} (window [{ROSSBY_MIN},{ROSSBY_MAX}]) → feasible={base['feasible']}")
